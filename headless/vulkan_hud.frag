@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #version 450
-layout(push_constant) uniform Text { uint glyphs[24]; uint width; uint x; uint y; uint loading; } text;
+layout(push_constant) uniform Text { uint glyphs[24]; uint width; uint x; uint y; uint loading; uint scale; } text;
 layout(location = 0) out vec4 color;
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy) - ivec2(text.x, text.y);
+    // Divide only non-negative offsets: integer division rounds -1 up to 0.
+    if (p.x >= 0 && p.y >= 0) p /= int(max(text.scale, 1u));
     // Vulkan push-constant arrays require dynamically uniform indices. Load
     // each word at a constant index before the per-pixel local-array lookup.
     uint glyphs[24] = uint[24](

@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <vector>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <time.h>
 #include "hud.h"
@@ -38,6 +39,8 @@ std::atomic<bool> hud_enabled{true};
 HudClock vulkan_hud_clock;
 HudSnapshot vulkan_hud;
 double vulkan_hud_stats_time{}, vulkan_hud_speed{};
+// The resolution chosen in Settings > Video, as the HUD shows it (read when the game starts).
+std::string hud_resolution;
 bool vulkan_loading{};
 double vulkan_loading_last{-1};
 void Check(bool success, const char* operation) {
@@ -290,7 +293,7 @@ public:
             speed_percent = stats.emulation_speed * 100.0;
             last_stats = now;
         }
-        const auto text = FormatHudText(clock, speed_percent, "OGL");
+        const auto text = FormatHudText(clock, speed_percent, "OGL", hud_resolution.c_str());
         if (hud_enabled.load(std::memory_order_relaxed)) DrawHud(text.data(), false);
         Check(eglSwapBuffers(display, surface), "eglSwapBuffers");
     }
@@ -415,7 +418,10 @@ bool LoadingTick(VideoCore::RendererBase& renderer) {
 GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
     vulkan_loading = vulkan;
     vulkan_loading_last = -1;
-    hud_enabled.store(LoadPreferences().hud, std::memory_order_relaxed);
+    const auto preferences = LoadPreferences();
+    hud_enabled.store(preferences.hud, std::memory_order_relaxed);
+    hud_resolution = ResolutionName(preferences.resolution);
+    for (char& c : hud_resolution) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 #ifdef EDEN_PS5_VULKAN
     if (vulkan) {
         vulkan_hud_clock = {};
@@ -423,7 +429,10 @@ GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
         vulkan_hud_stats_time = vulkan_hud_speed = 0;
         window_info.type = Core::Frontend::WindowSystemType::PS5;
         window_info.render_surface = this;
-        UpdateCurrentFramebufferLayout(1920, 1080);
+        // The frame Eden draws the game into, which is then copied to the swapchain. RADV's
+        // VideoOut has one mode, 3840x2160: a 1920x1080 frame squeezed 4K rendering to 1080p
+        // and stretched it back.
+        UpdateCurrentFramebufferLayout(3840, 2160);
         return;
     }
 #else
@@ -496,7 +505,7 @@ void GraphicsWindow::OnFrameDisplayed() {
             vulkan_hud_speed = system->GetAndResetPerfStats().emulation_speed * 100.0;
             vulkan_hud_stats_time = now;
         }
-        vulkan_hud = MakeHudSnapshot(vulkan_hud_clock, vulkan_hud_speed);
+        vulkan_hud = MakeHudSnapshot(vulkan_hud_clock, vulkan_hud_speed, hud_resolution.c_str());
 #endif
         ++frame_total;
         if (frame_sample_start < 0) {

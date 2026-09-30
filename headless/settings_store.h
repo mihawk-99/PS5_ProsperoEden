@@ -3,7 +3,7 @@
 //
 //   {
 //     "version": 1,
-//     "video": { "renderer": "vulkan", "fps_overlay": true },
+//     "video": { "renderer": "vulkan", "fps_overlay": true, "resolution": "1080p" },
 //     "audio": { "volume": 100, "mute": false },
 //     "diagnostics": { "detailed_logging": false },
 //     "game_files": "/mnt/ext1/eden",
@@ -34,12 +34,54 @@ enum class GraphicsBackend { OpenGL, Vulkan };
 inline const char* BackendName(GraphicsBackend backend) {
     return backend == GraphicsBackend::OpenGL ? "OpenGL" : "Vulkan";
 }
+// Settings > Video > Resolution: the number of lines games render at. A Switch game draws
+// 1080 lines docked and 720 handheld; Eden multiplies that by the scale below.
+enum class RenderResolution { P720, P1080, P2160, P4320 };
+inline constexpr RenderResolution kRenderResolutions[] = {
+    RenderResolution::P720, RenderResolution::P1080, RenderResolution::P2160, RenderResolution::P4320};
+inline const char* ResolutionName(RenderResolution value) {
+    switch (value) {
+    case RenderResolution::P720: return "720p";
+    case RenderResolution::P1080: return "1080p";
+    case RenderResolution::P2160: return "4K";
+    case RenderResolution::P4320: return "8K";
+    }
+    return "1080p";
+}
+// The stored value: the name in lower case ("720p", "1080p", "4k", "8k").
+inline std::string ResolutionKey(RenderResolution value) {
+    std::string key = ResolutionName(value);
+    for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return key;
+}
+// The scale Eden applies, as up / 2^down_shift (its ResolutionSetup steps). Handheld reaches
+// every choice exactly (1x, 1.5x, 3x, 6x of 720). Docked has no 2/3 step, so 720p there is
+// 0.75x of 1080 (810 lines), the nearest step that does not go below 720.
+struct ResolutionScale {
+    unsigned up;
+    unsigned down_shift;
+};
+inline ResolutionScale ScaleFor(RenderResolution value, bool docked) {
+    switch (value) {
+    case RenderResolution::P720: return docked ? ResolutionScale{3, 2} : ResolutionScale{1, 0};
+    case RenderResolution::P1080: return docked ? ResolutionScale{1, 0} : ResolutionScale{3, 1};
+    case RenderResolution::P2160: return docked ? ResolutionScale{2, 0} : ResolutionScale{3, 0};
+    case RenderResolution::P4320: return docked ? ResolutionScale{4, 0} : ResolutionScale{6, 0};
+    }
+    return {1, 0};
+}
+inline unsigned RenderedLines(RenderResolution value, bool docked) {
+    const auto scale = ScaleFor(value, docked);
+    return ((docked ? 1080u : 720u) * scale.up) >> scale.down_shift;
+}
+
 struct Preferences {
     bool hud = true;
     int volume = 100;
     bool mute = false;
     bool detailed_logging = false;
     GraphicsBackend backend = GraphicsBackend::Vulkan;
+    RenderResolution resolution = RenderResolution::P1080;
 };
 
 inline bool ValidRomFilename(std::string_view name) {
@@ -161,6 +203,9 @@ inline Preferences LoadPreferences(const std::string& file = SettingsFile()) {
     result.hud = Settings::Bool(document, Json::json_pointer("/video/fps_overlay"), result.hud);
     result.backend = Settings::String(document, Json::json_pointer("/video/renderer")) == "opengl" ?
         GraphicsBackend::OpenGL : GraphicsBackend::Vulkan;
+    const std::string resolution = Settings::String(document, Json::json_pointer("/video/resolution"));
+    for (const auto value : kRenderResolutions)
+        if (resolution == ResolutionKey(value)) result.resolution = value;
     const int volume = Settings::Int(document, Json::json_pointer("/audio/volume"), result.volume);
     if (volume >= 0 && volume <= 100) result.volume = volume;
     result.mute = Settings::Bool(document, Json::json_pointer("/audio/mute"), result.mute);
@@ -176,6 +221,7 @@ inline bool SavePreferences(const Preferences& value, const std::string& file = 
     document["version"] = 1;
     document["video"]["renderer"] = value.backend == GraphicsBackend::Vulkan ? "vulkan" : "opengl";
     document["video"]["fps_overlay"] = value.hud;
+    document["video"]["resolution"] = ResolutionKey(value.resolution);
     document["audio"]["volume"] = value.volume;
     document["audio"]["mute"] = value.mute;
     document["diagnostics"]["detailed_logging"] = value.detailed_logging;

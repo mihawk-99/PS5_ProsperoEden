@@ -2,7 +2,7 @@
 // Where ProsperoEden keeps things. With filesystem access (elevation/elevation.hpp, requested
 // first thing in main) the app uses real console paths:
 //   app folder     the install location, normally /data/homebrew/PPSA99008
-//   data           /data/prosperoeden: config/ (prosperoeden.json), logs/, covers/, user/
+//   data           /data/prosperoeden: config/ (prosperoeden.json), logs/, covers/, user/, cache/
 // Without it (no elfldr, or the request failed) the sandbox paths stay: /app0 and /download0.
 #pragma once
 #include <cstdio>
@@ -50,6 +50,8 @@ inline std::string ConfigDir() { return FilesystemAccess() ? std::string{kDataDi
 inline std::string LogsDir() { return FilesystemAccess() ? std::string{kDataDir} + "/logs" : "/download0/eden-headless-g7"; }
 inline std::string CoversDir() { return FilesystemAccess() ? std::string{kDataDir} + "/covers" : "/download0/prosperoeden/covers"; }
 inline std::string UserDir() { return FilesystemAccess() ? std::string{kDataDir} + "/user" : "/download0/eden-headless-g7/user"; }
+// The GPU driver's shader cache (RADV's on-disk cache, MESA_SHADER_CACHE_DIR).
+inline std::string CacheDir() { return FilesystemAccess() ? std::string{kDataDir} + "/cache" : "/download0/prosperoeden/cache"; }
 inline std::string ConfigFile(std::string_view name) { return ConfigDir() + "/" + std::string(name); }
 inline std::string LogFile(std::string_view name) { return LogsDir() + "/" + std::string(name); }
 

@@ -54,10 +54,12 @@ int main() {
     assert(snapshot.width == std::string_view("VLK F60 S100 W17").size() * 16 + 24);
     clock.fps = -1;
     assert(Eden::MakeHudSnapshot(clock, 0).glyphs == Eden::HudText("VLK F-- S-- W--"));
+    assert(Eden::MakeHudSnapshot(clock, 0, "1080P").glyphs == Eden::HudText("VLK 1080P F-- S-- W--"));
+    for (const char c : std::string_view("1080P 720P 4K 8K")) assert(c == ' ' || Eden::HudGlyph(c) != 0);
     clock.fps = 1000000;
     clock.worst_ms = 1000000;
     assert(Eden::MakeHudSnapshot(clock, 1000000).width <= 24 * 16 + 24);
-    static_assert(sizeof(Eden::HudSnapshot) == 112);
+    static_assert(sizeof(Eden::HudSnapshot) == 116);
     assert(Eden::MakeLoadingSnapshot(0).glyphs == Eden::HudText("LOADING"));
     assert(Eden::MakeLoadingSnapshot(0.75).glyphs == Eden::HudText("LOADING..."));
     assert(Eden::MakeLoadingSnapshot(1).glyphs == Eden::HudText("LOADING"));

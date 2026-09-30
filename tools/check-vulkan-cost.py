@@ -24,8 +24,9 @@ int main(){
 }''')
  subprocess.run(['c++','-std=c++20','-fsanitize=address,undefined','-I'+str(p),'-I'+str(root/'headless'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  output=subprocess.check_output([str(p/'test')],text=True)
- assert len(output.splitlines())==24
+ assert len(output.splitlines())==25
  for name in ('pipeline_ready_wait','shader_prepare','pipeline_cache_save',
-              'shader_pool_reset','shader_cfg','shader_ir','shader_spirv','shader_module'):
+              'shader_pool_reset','shader_cfg','shader_ir','shader_spirv','shader_module',
+              'graphics_pipeline_optimize'):
   assert f'api={name} calls=1 ' in output
 print('Vulkan optional timers: disabled, enabled, exception cleanup PASS')
