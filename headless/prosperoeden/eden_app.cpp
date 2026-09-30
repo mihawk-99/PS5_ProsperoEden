@@ -752,6 +752,11 @@ void EdenApp::OpenPatches(int game) {
         patches_build_ = build;
     if (!patches_build_.empty()) patches_ = Eden::Patches::ForGame(patches_title_, patches_build_);
     for (const auto& id : Eden::LoadGamePatches(patches_title_)) patches_chosen_.insert(id);
+    char title[17];
+    std::snprintf(title, sizeof(title), "%016llX", static_cast<unsigned long long>(patches_title_));
+    Eden::Report("patches", (std::string{"title "} + title + " build " +
+                             (patches_build_.empty() ? std::string{"unreadable"} : patches_build_.substr(0, 16)) +
+                             ": " + std::to_string(patches_.size()) + " entries in " + Eden::PatchesDir()).c_str());
     SetClass(document_, "patches-dialog", "open", true);
     dialog_ = 9;
     UpdatePatches();

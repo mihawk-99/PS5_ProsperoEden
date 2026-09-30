@@ -10,30 +10,61 @@
 #include <set>
 #include <string>
 #include <system_error>
+#include <sys/stat.h>
 #include <vector>
 
 #include "patch_library.h"
 #include "storage_paths.h"
 #if defined(__PROSPERO__)
-#include "native_directory.h"
+#include <cstddef>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+extern "C" int sceKernelGetdents(int, char*, int);
 #endif
 
 namespace Eden::Patches {
+// Types come from the directory records (stat for unknown ones): the console denies lstat,
+// which std::filesystem's is_directory() uses, so every folder read as a file.
 inline Lister FolderLister() {
     return [](const std::string& path) {
         std::vector<std::pair<std::string, bool>> out;
-        std::error_code error;
 #if defined(__PROSPERO__)
-        const auto entries = Eden::ReadNativeDirectory(path, error);
-#else
-        std::vector<std::filesystem::directory_entry> entries;
-        for (std::filesystem::directory_iterator it{path, error}, end; !error && it != end; it.increment(error))
-            entries.push_back(*it);
-#endif
-        for (const auto& entry : entries) {
-            std::error_code type_error;
-            out.emplace_back(entry.path().filename().string(), entry.is_directory(type_error));
+        const int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY);
+        if (fd < 0) return out;
+        std::vector<char> buffer(65536);
+        for (;;) {
+            const int count = sceKernelGetdents(fd, buffer.data(), static_cast<int>(buffer.size()));
+            if (count <= 0 || count > static_cast<int>(buffer.size())) break;
+            for (std::size_t offset = 0; offset + offsetof(dirent, d_name) < static_cast<std::size_t>(count);) {
+                std::uint16_t length;
+                std::uint8_t type;
+                std::memcpy(&length, buffer.data() + offset + offsetof(dirent, d_reclen), sizeof(length));
+                std::memcpy(&type, buffer.data() + offset + offsetof(dirent, d_type), sizeof(type));
+                if (length <= offsetof(dirent, d_name) || offset + length > static_cast<std::size_t>(count)) break;
+                const char* name = buffer.data() + offset + offsetof(dirent, d_name);
+                const std::string entry(name, strnlen(name, length - offsetof(dirent, d_name)));
+                offset += length;
+                if (entry.empty() || entry == "." || entry == "..") continue;
+                bool is_directory = type == DT_DIR;
+                if (type == DT_UNKNOWN || type == DT_LNK) {
+                    struct stat info {};
+                    if (stat((path + "/" + entry).c_str(), &info) != 0) continue;
+                    is_directory = S_ISDIR(info.st_mode);
+                }
+                out.emplace_back(entry, is_directory);
+            }
         }
+        close(fd);
+#else
+        std::error_code error;
+        for (std::filesystem::directory_iterator it{path, error}, end; !error && it != end; it.increment(error)) {
+            std::error_code type_error;
+            out.emplace_back(it->path().filename().string(), it->is_directory(type_error));
+        }
+#endif
         return out;
     };
 }
@@ -49,8 +80,8 @@ inline Reader FileReader() {
 
 // The entries in the patch folder for this game build (none when the folder is missing).
 inline std::vector<Entry> ForGame(std::uint64_t title_id, const std::string& build_id) {
-    std::error_code error;
-    if (!std::filesystem::is_directory(PatchesDir(), error)) return {};
+    struct stat info {};
+    if (stat(PatchesDir().c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) return {};
     return Find(PatchesDir(), title_id, build_id, FolderLister(), FileReader());
 }
 
