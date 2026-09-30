@@ -105,3 +105,21 @@ ShadowMountPlus was running at the time; its README warns that mounting can caus
 problems and data corruption on internal drives.
 
 Nothing more was written to the console after this was found.
+
+## Memory backed on first touch (replaces the sparse page tables)
+
+The console's storage was repaired and the homebrew redeployed. Then:
+
+- **8K stays 8K.** The per-game step-down is gone; a game that does not fit ends with "Not enough
+  GPU memory for 8K in this game. Choose a lower resolution in Settings > Video".
+- **Guest RAM and page tables are backed on first touch** (`src/memory_pages.cpp`, on by default,
+  `dev-settings lazy_memory=off` for the dense layout). A lazy range is reserved address space; the
+  first access to a chunk faults and the handler gives it its own direct memory, zeroed through a
+  scratch address used once, then mapped in the reserved range. Nothing is mapped at two
+  addresses at once and no live mapping is replaced, unlike the design the console powered off
+  with. Guest RAM uses 2 MiB chunks (fastmem off only), the page tables 64 KiB;
+  `ClearBackingRegion` skips chunks never backed, as they are zero already.
+
+Super Mario Odyssey at 8K, 45 s from boot (run z1-8k): 10,022 MiB free when the game started
+(2,875 originally, 6,013 with the heap change); 1.6 GiB of lazy memory backed after 45 s; no
+faults, and the console stayed up after the title was closed.

@@ -58,6 +58,12 @@ eden_fastmem_probe_fallback:
 
 namespace Common {
 void* AllocateMemoryPages(size_t size) noexcept;
+// Memory backed on first touch (src/memory_pages.cpp).
+void* LazyReserve(std::size_t size, std::size_t chunk) noexcept;
+bool LazyOwns(const void* pointer) noexcept;
+bool LazyBacked(const void* pointer) noexcept;
+bool LazyCommit(const void* pointer) noexcept;
+void LazyRelease(void* pointer) noexcept;
 void FreeMemoryPages(void* base, size_t size) noexcept;
 #ifdef PS5_NATIVE
 std::int64_t DirectMemoryStart(const void* pointer) noexcept;
@@ -478,6 +484,9 @@ public:
             base = static_cast<u8*>(mapped);
         }
 #endif
+        // Without a fastmem window (which aliases the backing's one direct allocation), the
+        // guest RAM is backed on first touch in 2 MiB chunks: games touch a fraction of the 4 GiB.
+        if (!base && !fastmem) base = static_cast<u8*>(LazyReserve(requested, 2u << 20));
         if (!base) base = static_cast<u8*>(AllocateMemoryPages(requested));
         if (!base) throw std::system_error(errno, std::generic_category(), "Backing allocation");
         if (!fastmem) return;
@@ -497,7 +506,8 @@ public:
             return;
         }
 #endif
-        FreeMemoryPages(base, size);
+        if (LazyOwns(base)) LazyRelease(base);
+        else FreeMemoryPages(base, size);
     }
 };
 
@@ -525,7 +535,21 @@ HostMemory& HostMemory::operator=(HostMemory&& other) noexcept {
 void HostMemory::ClearBackingRegion(size_t offset, size_t length, u32 fill) {
     if (offset > backing_size || length > backing_size - offset)
         throw std::out_of_range("Backing clear range");
-    if (length) std::memset(backing_base + offset, fill, length);
+    if (!length) return;
+    if (!LazyOwns(backing_base)) {
+        std::memset(backing_base + offset, fill, length);
+        return;
+    }
+    // Lazy backing: a chunk not backed yet is zero already, so a zero fill skips it rather than
+    // backing the whole allocation; other fills (debug) back it first.
+    constexpr size_t Chunk = 2u << 20;
+    for (size_t at = offset; at < offset + length;) {
+        const size_t end = std::min(offset + length, (at / Chunk + 1) * Chunk);
+        u8* pointer = backing_base + at;
+        if (fill != 0 && !LazyCommit(pointer)) throw std::bad_alloc{};
+        if (LazyBacked(pointer)) std::memset(pointer, fill, end - at);
+        at = end;
+    }
 }
 // Eden calls these only while a page table uses VirtualBasePointer() as its fastmem
 // arena. Without a window they are rejected rather than presented as no-ops.

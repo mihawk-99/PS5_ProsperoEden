@@ -27,6 +27,7 @@ struct CodeRange {
 };
 // One entry per JIT code cache with fastmem (a few per emulated core). Lock-free so the
 // handler never waits on a thread that registers or retires a JIT.
+extern "C" bool eden_lazy_memory_fault(void* address) __attribute__((weak));
 std::array<CodeRange, 64> ranges;
 std::atomic<std::uint64_t> fault_count{0};
 struct sigaction previous_segv{}, previous_bus{};
@@ -45,6 +46,9 @@ void Forward(int signal, siginfo_t* info, void* context) {
 }
 
 void Handle(int signal, siginfo_t* info, void* context) {
+    // Memory backed on first touch (src/memory_pages.cpp) comes first: a JIT access to it is
+    // not a fastmem access.
+    if (eden_lazy_memory_fault && eden_lazy_memory_fault(info->si_addr)) return;
     const std::uint64_t pc = Eden::Fastmem::ContextRip(context);
     for (auto& range : ranges) {
         const auto begin = range.begin.load(std::memory_order_acquire);

@@ -250,32 +250,7 @@ inline bool SaveGameDocked(uint64_t title_id, bool docked, const std::string& fi
     return Settings::Write(document, file);
 }
 
-// The highest resolution a game fits in memory at, saved when rendering above it ran out of
-// memory (the game restarts one step lower). Absent: no limit. Choosing a resolution again in
-// Settings clears every game's limit, so it is tried again.
-inline RenderResolution LoadGameResolutionLimit(uint64_t title_id, const std::string& file = SettingsFile()) {
-    if (!title_id) return RenderResolution::P4320;
-    const std::string key = Settings::String(Settings::Load(file), Settings::Json::json_pointer(
-        "/games/" + Settings::TitleKey(title_id) + "/resolution_limit"));
-    for (const auto value : kRenderResolutions)
-        if (key == ResolutionKey(value)) return value;
-    return RenderResolution::P4320;
-}
-inline bool SaveGameResolutionLimit(uint64_t title_id, RenderResolution limit, const std::string& file = SettingsFile()) {
-    if (!title_id) return false;
-    Settings::Json document = Settings::Load(file);
-    document["version"] = 1;
-    document["games"][Settings::TitleKey(title_id)]["resolution_limit"] = ResolutionKey(limit);
-    return Settings::Write(document, file);
-}
-inline bool ClearResolutionLimits(const std::string& file = SettingsFile()) {
-    Settings::Json document = Settings::Load(file);
-    if (!document.contains("games") || !document["games"].is_object()) return true;
-    for (auto& [key, game] : document["games"].items())
-        if (game.is_object()) game.erase("resolution_limit");
-    return Settings::Write(document, file);
-}
-// The resolution the running game renders at: the Settings choice, lowered to the game's limit.
+// The resolution the running game renders at (the Settings choice when it started).
 inline RenderResolution& SessionResolution() {
     static RenderResolution value = RenderResolution::P1080;
     return value;
