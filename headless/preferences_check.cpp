@@ -42,6 +42,14 @@ int main() {
         assert(Eden::RenderedLines(Eden::kRenderResolutions[i], false) == handheld[i]);
     }
     assert(std::string(Eden::ResolutionName(Eden::RenderResolution::P4320)) == "8K");
+    // Per-game resolution limits: none by default, saved per title, cleared together.
+    assert(Eden::LoadGameResolutionLimit(0x0100000000010000ull, file) == Eden::RenderResolution::P4320);
+    assert(Eden::SaveGameResolutionLimit(0x0100000000010000ull, Eden::RenderResolution::P2160, file));
+    assert(Eden::LoadGameResolutionLimit(0x0100000000010000ull, file) == Eden::RenderResolution::P2160);
+    assert(Eden::LoadGameResolutionLimit(0x0100152000022000ull, file) == Eden::RenderResolution::P4320);
+    assert(Eden::ClearResolutionLimits(file));
+    assert(Eden::LoadGameResolutionLimit(0x0100000000010000ull, file) == Eden::RenderResolution::P4320);
+    assert(Eden::LoadPreferences(file).resolution == Eden::RenderResolution::P2160);
 
     // Last and recent games.
     assert(Eden::SaveLastGame("Sample Quest [id].nsp", file));

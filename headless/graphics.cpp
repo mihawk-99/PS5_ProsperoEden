@@ -420,7 +420,7 @@ GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
     vulkan_loading_last = -1;
     const auto preferences = LoadPreferences();
     hud_enabled.store(preferences.hud, std::memory_order_relaxed);
-    hud_resolution = ResolutionName(preferences.resolution);
+    hud_resolution = ResolutionName(SessionResolution());
     for (char& c : hud_resolution) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 #ifdef EDEN_PS5_VULKAN
     if (vulkan) {

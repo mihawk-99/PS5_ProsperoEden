@@ -27,6 +27,9 @@ static std::vector<int> handles;
 static bool enabled;
 extern "C" std::int64_t sceKernelGetDirectMemorySize() { return std::int64_t{1}<<40; }
 extern "C" int sceKernelEnableDmemAliasing() { enabled=true; return 0; }
+// The sparse page-table backing (memory_pages.cpp) is not exercised here: refuse it.
+extern "C" int sceKernelReserveVirtualRange(void**, size_t, int, size_t) { return -1; }
+extern "C" int sceKernelDebugOutText(int, const char*) { return 0; }
 extern "C" int sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, size_t size,
                                                size_t, int type, std::int64_t* out) {
     if (++stage==fail_stage) return std::int32_t(0x80020001u);

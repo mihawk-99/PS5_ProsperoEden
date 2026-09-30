@@ -18,6 +18,40 @@ target_include_directories(common BEFORE PUBLIC "${PORT_BUILD_DIR}/recovery")
 # A consumer's own source include path precedes inherited includes. All current
 # SlotVector users live in video_core, so place its override before that path too.
 target_include_directories(video_core BEFORE PRIVATE "${PORT_BUILD_DIR}/recovery")
+# SparseLargeVector (the page tables) on sparse direct memory (src/memory_pages.cpp): its
+# range reads as zeros and each 2 MiB is backed when a page in it is first committed.
+file(READ "${PROJECT_SOURCE_DIR}/src/common/sparse_large_vector.h" sparse_vector)
+function(sparse_vector_replace old new)
+    string(FIND "${sparse_vector}" "${old}" at)
+    if(at EQUAL -1)
+        message(FATAL_ERROR "Pinned SparseLargeVector changed: ${old}")
+    endif()
+    string(REPLACE "${old}" "${new}" result "${sparse_vector}")
+    set(sparse_vector "${result}" PARENT_SCOPE)
+endfunction()
+sparse_vector_replace("void FreeMemoryPages(void* base, std::size_t size) noexcept;"
+    "void FreeMemoryPages(void* base, std::size_t size) noexcept;
+void* AllocateSparsePages(std::size_t size) noexcept;
+void FreeSparsePages(void* base, std::size_t size) noexcept;
+void CommitSparsePage(void* page) noexcept;")
+sparse_vector_replace("AllocateMemoryPages(alloc_size)" "AllocateSparsePages(alloc_size)")
+sparse_vector_replace("FreeMemoryPages(base_ptr, alloc_size)" "FreeSparsePages(base_ptr, alloc_size)")
+sparse_vector_replace("mprotect(reinterpret_cast<void*>(page), HostPageSize, PROT_READ | PROT_WRITE);"
+    "CommitSparsePage(reinterpret_cast<void*>(page));")
+# As write_derived (below): keep the timestamp when unchanged.
+file(WRITE "${PORT_BUILD_DIR}/recovery/common/sparse_large_vector.h.in" "${sparse_vector}")
+configure_file("${PORT_BUILD_DIR}/recovery/common/sparse_large_vector.h.in"
+    "${PORT_BUILD_DIR}/recovery/common/sparse_large_vector.h" COPYONLY)
+# ccache's direct mode does not see a new header shadowing the upstream one: the override's
+# hash in every consumer's command line makes their objects miss once it changes.
+string(SHA256 sparse_hash "${sparse_vector}")
+string(SUBSTRING "${sparse_hash}" 0 16 sparse_hash)
+target_compile_definitions(common PUBLIC EDEN_SPARSE_VECTOR_REVISION=0x${sparse_hash})
+# A target's own source include path precedes inherited ones, so each target whose sources
+# include the header puts the override first itself (mixing the two layouts corrupts memory).
+foreach(target core hid_core audio_core)
+    target_include_directories(${target} BEFORE PRIVATE "${PORT_BUILD_DIR}/recovery")
+endforeach()
 file(GLOB overlay_inputs CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/*.inc")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${overlay_inputs})
 function(write_derived path content)
@@ -1970,3 +2004,11 @@ if(EDEN_DEV_VULKAN)
     endif()
     target_compile_definitions(eden-headless PRIVATE EDEN_DEV_VULKAN=1)
 endif()
+# The SparseLargeVector override (top of this file) first in the executables that add src/
+# themselves, as in the libraries.
+foreach(target eden-headless eden-romfs-check eden-scalar-check eden-memory-check eden-devices-check
+        eden-preferences-check eden-slot-vector-recovery-check eden-cache-budget-check)
+    if(TARGET ${target})
+        target_include_directories(${target} BEFORE PRIVATE "${PORT_BUILD_DIR}/recovery")
+    endif()
+endforeach()

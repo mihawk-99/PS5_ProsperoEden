@@ -4,6 +4,7 @@
 #include "common/cpu_features.h"
 #include "common/sparse_large_vector.h"
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <set>
 #include <cerrno>
@@ -310,16 +311,44 @@ extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::in
                                                            std::size_t*);
 #endif
 
-void ReportDirectMemory(const char* when) {
-#ifdef PS5_NATIVE
-    const std::int64_t total = sceKernelGetDirectMemorySize();
-    if (total <= 0) return;
-    // The kernel answers with the largest free range in a span; the ranges either side of it
-    // are searched in turn (a bounded stack: the pool has at most a few hundred free ranges).
+extern "C" std::size_t eden_heap_committed_total(void) __attribute__((weak));
+
+namespace {
+struct FreeMemory {
     std::uint64_t free_bytes = 0, largest_bytes = 0;
     unsigned ranges = 0;
+};
+[[maybe_unused]] FreeMemory ScanFreeMemory(std::int64_t total);
+}
+
+unsigned long long GpuMemoryLimit(unsigned long long vulkan_used) {
+#ifdef PS5_NATIVE
+    constexpr unsigned long long Headroom = 768ull << 20;
+    static std::atomic<long long> last_ns{0};
+    static std::atomic<unsigned long long> free_bytes{0};
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - last_ns.load(std::memory_order_relaxed) >= 500'000'000) {
+        last_ns.store(now, std::memory_order_relaxed);
+        if (const std::int64_t total = sceKernelGetDirectMemorySize(); total > 0)
+            free_bytes.store(ScanFreeMemory(total).free_bytes, std::memory_order_relaxed);
+    }
+    const unsigned long long reachable = vulkan_used + free_bytes.load(std::memory_order_relaxed);
+    return reachable > Headroom ? reachable - Headroom : 1;
+#else
+    (void)vulkan_used;
+    return 0;
+#endif
+}
+
+namespace {
+// The kernel answers with the largest free range in a span; the ranges either side of it
+// are searched in turn (a bounded stack: the pool has at most a few hundred free ranges).
+[[maybe_unused]] FreeMemory ScanFreeMemory(std::int64_t total) {
+    FreeMemory result;
+#ifdef PS5_NATIVE
     std::vector<std::pair<std::int64_t, std::int64_t>> spans{{0, total}};
-    while (!spans.empty() && ranges < 4096) {
+    while (!spans.empty() && result.ranges < 4096) {
         const auto [low, high] = spans.back();
         spans.pop_back();
         std::int64_t start = 0;
@@ -327,16 +356,30 @@ void ReportDirectMemory(const char* when) {
         if (high - low < 0x4000 || sceKernelAvailableDirectMemorySize(low, high, 0x4000, &start, &size) != 0 ||
             size == 0)
             continue;
-        ++ranges;
-        free_bytes += size;
-        largest_bytes = std::max<std::uint64_t>(largest_bytes, size);
+        ++result.ranges;
+        result.free_bytes += size;
+        result.largest_bytes = std::max<std::uint64_t>(result.largest_bytes, size);
         spans.emplace_back(low, start);
         spans.emplace_back(start + static_cast<std::int64_t>(size), high);
     }
-    std::printf("EDEN_MEMORY when=%s pool_mib=%lld free_mib=%llu largest_free_mib=%llu free_ranges=%u vulkan_mib=%llu\n",
+#else
+    (void)total;
+#endif
+    return result;
+}
+}
+
+void ReportDirectMemory(const char* when) {
+#ifdef PS5_NATIVE
+    const std::int64_t total = sceKernelGetDirectMemorySize();
+    if (total <= 0) return;
+    const auto [free_bytes, largest_bytes, ranges] = ScanFreeMemory(total);
+    std::printf("EDEN_MEMORY when=%s pool_mib=%lld free_mib=%llu largest_free_mib=%llu free_ranges=%u vulkan_mib=%llu "
+                "heap_mib=%llu\n",
                 when, static_cast<long long>(total >> 20), static_cast<unsigned long long>(free_bytes >> 20),
                 static_cast<unsigned long long>(largest_bytes >> 20), ranges,
-                vulkan_memory_used.load(std::memory_order_relaxed) >> 20);
+                vulkan_memory_used.load(std::memory_order_relaxed) >> 20,
+                eden_heap_committed_total ? static_cast<unsigned long long>(eden_heap_committed_total() >> 20) : 0ull);
     std::fflush(stdout);
 #else
     (void)when;

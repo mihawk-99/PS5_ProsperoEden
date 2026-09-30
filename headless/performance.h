@@ -19,6 +19,10 @@ void Snapshot();
 void ReportDirectMemory(const char* when);
 // What the Vulkan heaps hold (VK_EXT_memory_budget usage), as the texture cache last read it.
 inline std::atomic<unsigned long long> vulkan_memory_used{0};
+// The Vulkan memory the texture cache can plan for: what the heaps hold now plus the pool's free
+// direct memory, less headroom for the heap's growth and the driver's own allocations. The
+// heaps' size (8 GiB of the 12 GiB pool) counts memory the emulator already holds. 0 off-console.
+unsigned long long GpuMemoryLimit(unsigned long long vulkan_used);
 // GPU worker only: firmware rejects cross-thread CPU-time sampling.
 void SampleGpuFrame(unsigned frame);
 #ifdef EDEN_DEV_PROFILE
