@@ -27,6 +27,7 @@ Changes on this fork's `main` that upstream does not have yet:
 - **Current PS5 Vulkan driver**: PS5 Mesa `0b2d6d1` and PS5 Vulkan `d609d71`.
 - **RADV's shader cache works** and lives in `/data/prosperoeden/cache/radv` (elevation had left the effective group apart from the real one, which turns Mesa's disk cache off).
 - **More memory for the GPU**: the 3 GiB heap is committed as it grows, the texture cache plans from what the 12 GiB pool can actually give, and a game that runs out of memory above 1080p restarts one resolution step lower (remembered per game until the resolution is chosen again). See [docs/MEMORY_FINDINGS.md](docs/MEMORY_FINDINGS.md), including an open question: the console powered off during a test of sparse page tables, which stay off by default.
+- **Patches per game**: copy patch collections into `/data/prosperoeden/patches` exactly as you downloaded them (a cheat database's `titles` folder in the Atmosphère layout, `.pchtxt` mods, extracted mod folders). In the Library, **Triangle** opens a game's **Patches** page listing what fits that game's exact version (matched by its build ID); **X** turns each cheat or patch on or off, and frame-rate and resolution choices replace each other. Chosen patches apply when the game starts. ProsperoEden ships no patches: it reads the folder you provide.
 - **Build and install**: tools installed in `~/.local/bin` are found, the installer accepts FTP servers that answer deletes with 226, and generated header overrides can no longer be shadowed by stale ccache objects.
 
 ```bash

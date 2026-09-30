@@ -82,7 +82,7 @@
           <span id="game-mode-setting"><img src="chrome/dialog-row-normal.tga" width="736" height="94" alt=""/><span class="game-mode-label">Console mode</span><span id="game-mode-value"><span id="mode-docked" class="mode-option"><img src="icons/mode-docked.tga" width="48" height="32" alt=""/><span>Docked</span></span><span id="mode-handheld" class="mode-option"><img src="icons/mode-handheld.tga" width="48" height="32" alt=""/><span>Handheld</span></span><span id="mode-unavailable">Unavailable</span></span></span>
           <span id="game-mode-hint"><img src="icons/leftright-mono.tga" width="26" height="26" alt=""/><span id="game-mode-hint-text">Change mode. Saved per game.</span></span>
         </aside>
-        <footer class="library-footer icon-footer"><span class="controller-hint lib-hint-select"><img class="hint-icon-0" src="icons/cross-mono.tga" width="26" height="26" alt=""/><span>Select</span></span><span class="controller-hint lib-hint-back"><img class="hint-icon-0" src="icons/circle-mono.tga" width="26" height="26" alt=""/><span>Back</span></span><span class="controller-hint lib-hint-browse"><img class="hint-icon-0" src="icons/updown-mono.tga" width="26" height="26" alt=""/><span>Browse games</span></span><span class="controller-hint lib-hint-mode"><img class="hint-icon-0" src="icons/leftright-mono.tga" width="26" height="26" alt=""/><span>Console mode</span></span></footer>
+        <footer class="library-footer icon-footer"><span class="controller-hint lib-hint-select"><img class="hint-icon-0" src="icons/cross-mono.tga" width="26" height="26" alt=""/><span>Select</span></span><span class="controller-hint lib-hint-back"><img class="hint-icon-0" src="icons/circle-mono.tga" width="26" height="26" alt=""/><span>Back</span></span><span class="controller-hint lib-hint-browse"><img class="hint-icon-0" src="icons/updown-mono.tga" width="26" height="26" alt=""/><span>Browse games</span></span><span class="controller-hint lib-hint-mode"><img class="hint-icon-0" src="icons/leftright-mono.tga" width="26" height="26" alt=""/><span>Console mode</span></span><span class="controller-hint lib-hint-patches"><img class="hint-icon-0" src="icons/triangle-mono.tga" width="26" height="26" alt=""/><span>Patches</span></span></footer>
       </div>
       <div id="settings-dialog" class="settings-screen">
         <img class="library-background" src="background.tga" width="1920" height="1080" alt=""/>
@@ -144,6 +144,41 @@
           <span id="files-message"></span>
         </aside>
         <footer class="library-footer icon-footer"><span class="controller-hint files-hint-open"><img class="hint-icon-0" src="icons/cross-mono.tga" width="26" height="26" alt=""/><span>Open</span></span><span class="controller-hint files-hint-back"><img class="hint-icon-0" src="icons/circle-mono.tga" width="26" height="26" alt=""/><span>Back</span></span><span class="controller-hint files-hint-use"><img class="hint-icon-0" src="icons/triangle-mono.tga" width="26" height="26" alt=""/><span>Use this folder</span></span><span class="controller-hint files-hint-default"><img class="hint-icon-0" src="icons/square-mono.tga" width="26" height="26" alt=""/><span>Default folder</span></span><span class="controller-hint files-hint-browse"><img class="hint-icon-0" src="icons/dpad-mono.tga" width="26" height="26" alt=""/><span>Browse</span></span><span class="controller-hint files-hint-page files-hint-pair"><img class="hint-icon-0" src="icons/l1-mono.tga" width="26" height="26" alt=""/><img class="hint-icon-1" src="icons/r1-mono.tga" width="26" height="26" alt=""/><span>Page</span></span></footer>
+      </div>
+      <div id="patches-dialog" class="library-screen">
+        <img class="library-background" src="background.tga" width="1920" height="1080" alt=""/>
+        <span class="library-shade"></span>
+        <span class="library-title">Patches</span>
+        <span class="library-copy">Cheats and patches from your patch folder that fit this game version</span>
+        <section class="library-list-panel">
+          <img class="library-panel-chrome" src="chrome/dialog-panel.tga" width="820" height="720" alt=""/>
+          <span class="library-panel-kicker">AVAILABLE</span>
+          <span id="patches-source"></span>
+          <div id="patches-list-viewport">
+            <span id="patch-row-0" class="library-row library-row-0 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-0" class="library-row-name patch-row-name"></span><span id="patch-meta-0" class="library-row-meta patch-row-meta"></span></span>
+            <span id="patch-row-1" class="library-row library-row-1 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-1" class="library-row-name patch-row-name"></span><span id="patch-meta-1" class="library-row-meta patch-row-meta"></span></span>
+            <span id="patch-row-2" class="library-row library-row-2 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-2" class="library-row-name patch-row-name"></span><span id="patch-meta-2" class="library-row-meta patch-row-meta"></span></span>
+            <span id="patch-row-3" class="library-row library-row-3 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-3" class="library-row-name patch-row-name"></span><span id="patch-meta-3" class="library-row-meta patch-row-meta"></span></span>
+            <span id="patch-row-4" class="library-row library-row-4 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-4" class="library-row-name patch-row-name"></span><span id="patch-meta-4" class="library-row-meta patch-row-meta"></span></span>
+            <span id="patch-row-5" class="library-row library-row-5 patch-row"><img class="library-row-chrome base-chrome" src="chrome/library-row-normal.tga" width="760" height="78" alt=""/><img class="library-row-chrome focused-chrome" src="chrome/library-row-focused.tga" width="760" height="78" alt=""/><span class="patch-check"></span><span id="patch-name-5" class="library-row-name patch-row-name"></span><span id="patch-meta-5" class="library-row-meta patch-row-meta"></span></span>
+          </div>
+          <span id="patches-empty">No patches for this game version.</span>
+          <span id="patches-scrollbar"><img class="files-scrollbar-track" src="chrome/scrollbar-track.tga" width="10" height="518" alt=""/><img id="patches-scrollbar-thumb" src="chrome/scrollbar-thumb.tga" width="10" height="110" alt=""/></span>
+          <span id="patches-position">0 OF 0</span>
+        </section>
+        <aside class="game-detail-panel">
+          <img class="library-panel-chrome" src="chrome/dialog-panel.tga" width="820" height="720" alt=""/>
+          <span class="detail-kicker">THIS GAME</span>
+          <span id="patches-game"></span>
+          <span class="files-label files-line-0">BUILD</span><span id="patches-build" class="files-value files-line-0"></span>
+          <span class="files-label files-line-1">FOUND</span><span id="patches-found" class="files-value files-line-1"></span>
+          <span class="files-label files-line-2">CHOSEN</span><span id="patches-chosen" class="files-value files-line-2"></span>
+          <span class="about-divider files-divider-0"></span>
+          <span class="files-label files-line-3">FOLDER</span><span id="patches-folder" class="files-value files-line-3"></span>
+          <span class="about-divider patches-divider-1"></span>
+          <span id="patches-message"></span>
+        </aside>
+        <footer class="library-footer icon-footer"><span class="controller-hint patches-hint-toggle"><img class="hint-icon-0" src="icons/cross-mono.tga" width="26" height="26" alt=""/><span>Turn on / off</span></span><span class="controller-hint patches-hint-back"><img class="hint-icon-0" src="icons/circle-mono.tga" width="26" height="26" alt=""/><span>Back</span></span><span class="controller-hint patches-hint-browse"><img class="hint-icon-0" src="icons/updown-mono.tga" width="26" height="26" alt=""/><span>Browse</span></span><span class="controller-hint patches-hint-page files-hint-pair"><img class="hint-icon-0" src="icons/l1-mono.tga" width="26" height="26" alt=""/><img class="hint-icon-1" src="icons/r1-mono.tga" width="26" height="26" alt=""/><span>Page</span></span></footer>
       </div>
       <div id="video-dialog" class="dialog"><div class="dialog-panel">
         <img class="dialog-panel-chrome" src="chrome/modal-panel.tga" width="820" height="720" alt=""/>

@@ -2,6 +2,8 @@
 
 #include "radio_input.h"
 #include "preferences.h"
+#include "patch_library.h"
+#include <set>
 #include <string>
 #include <vector>
 #include <ctime>
@@ -28,6 +30,10 @@ private:
     bool BrowseTo(const std::string& directory);
     void HandleFilesInput(const radio_input_event_t& event);
     void UpdateFiles();
+    // A game's Patches page: the patch folder's entries for its build (headless/patch_library.h).
+    void OpenPatches(int game);
+    void HandlePatchesInput(const radio_input_event_t& event);
+    void UpdatePatches();
 
     Rml::ElementDocument* document_ = nullptr;
     Eden::Preferences preferences_;
@@ -45,4 +51,11 @@ private:
     std::vector<std::string> browse_entries_; // ".." first unless at "/", then subfolders
     int browse_selected_ = 0;
     std::string files_message_;
+    uint64_t patches_title_{};
+    std::string patches_build_;
+    std::string patches_game_;
+    std::vector<Eden::Patches::Entry> patches_;
+    std::set<std::string> patches_chosen_;
+    int patches_selected_ = 0;
+    std::string patches_message_;
 };

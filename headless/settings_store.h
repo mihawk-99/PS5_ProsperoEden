@@ -250,6 +250,27 @@ inline bool SaveGameDocked(uint64_t title_id, bool docked, const std::string& fi
     return Settings::Write(document, file);
 }
 
+// The patches chosen for a game (headless/patch_library.h entry IDs), under games/<title>/patches.
+inline std::vector<std::string> LoadGamePatches(uint64_t title_id, const std::string& file = SettingsFile()) {
+    std::vector<std::string> ids;
+    if (!title_id) return ids;
+    const Settings::Json document = Settings::Load(file);
+    const Settings::Json::json_pointer at("/games/" + Settings::TitleKey(title_id) + "/patches");
+    if (document.contains(at) && document.at(at).is_array())
+        for (const auto& id : document.at(at))
+            if (id.is_string()) ids.push_back(id.get<std::string>());
+    return ids;
+}
+inline bool SaveGamePatches(uint64_t title_id, const std::vector<std::string>& ids, const std::string& file = SettingsFile()) {
+    if (!title_id) return false;
+    Settings::Json document = Settings::Load(file);
+    document["version"] = 1;
+    auto& game = document["games"][Settings::TitleKey(title_id)];
+    if (ids.empty()) game.erase("patches");
+    else game["patches"] = ids;
+    return Settings::Write(document, file);
+}
+
 // The resolution the running game renders at (the Settings choice when it started).
 inline RenderResolution& SessionResolution() {
     static RenderResolution value = RenderResolution::P1080;
