@@ -12,6 +12,22 @@
 
 This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.020**.
 
+## About this fork
+
+This repository, [mihawk-99/PS5_ProsperoEden](https://github.com/mihawk-99/PS5_ProsperoEden), is my development fork of [blackbearreloaded/ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden). ProsperoEden is updated often upstream; this fork is where I prepare changes before they go back as pull requests, mainly the integration with the PS5 Vulkan driver ([PS5 Mesa](https://github.com/mihawk-99/PS5_Mesa), [PS5 Vulkan](https://github.com/mihawk-99/PS5_Vulkan)) and the [payload SDK fork](https://github.com/mihawk-99/PS5_PayloadSDK). Releases come from the upstream repository. Everything below this section is upstream's README, kept unchanged so merges stay clean.
+
+- **`main`** is upstream's `main` plus the work that has not been merged upstream yet. It is the development line: work lands there.
+- **Upstream is merged in, never rebased onto.** `main` is published, so it is never rewritten or force-pushed.
+- **Pull requests** go from a short-lived branch cut from `upstream/main`, so each one carries only its own change. The branch is deleted once upstream merges it, and the merge comes back to `main` with the next sync.
+
+```bash
+git remote add upstream https://github.com/blackbearreloaded/ProsperoEden.git   # once, after cloning
+git fetch upstream && git merge upstream/main && git push origin main           # take upstream's updates
+git switch -c pr/<topic> upstream/main                                          # start a pull request
+git push -u origin pr/<topic>                                                   # after committing to it
+gh pr create --repo blackbearreloaded/ProsperoEden --base main --head mihawk-99:pr/<topic>
+```
+
 ## Source code
 
 The complete ProsperoEden source is in this repository: the PS5 frontend and launcher in `headless/`, and the build and packaging tools in `tools/`. To build it yourself, run `make` on Linux (Ubuntu 26.04; WSL works). It fetches every dependency at its pinned revision and writes the release files to `dist/`; `make help` lists the other targets. See [docs/BUILDING.md](docs/BUILDING.md).
