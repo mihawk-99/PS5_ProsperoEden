@@ -128,6 +128,12 @@ int main(int argc, char** argv) {
         // (assets_dir.h). Requested once, still single-threaded. Without it the app keeps its
         // sandbox paths.
         Eden::FilesystemAccessStatus() = static_cast<int>(elevation::request(elevation::Capability::filesystem));
+        // Elevation leaves the effective group (1) apart from the real one (0), and Mesa turns
+        // RADV's disk cache off for a process whose real and effective ids differ, so no
+        // compiled shader was ever kept between sessions. Match them; the effective user is
+        // root, which may set its group.
+        if (getegid() != getgid() && setegid(getgid()) != 0)
+            Eden::Report("filesystem access", "Could not match the effective group; RADV's disk cache stays off");
         if (Eden::FilesystemAccess()) MigrateSandboxData();
         for (const auto& folder : {Eden::UserDir(), Eden::ConfigDir(), Eden::CoversDir(), Eden::LogsDir(),
                                    Eden::CacheDir()}) {
@@ -195,6 +201,7 @@ int main(int argc, char** argv) {
         report = std::fopen(Eden::LogFile("result.tsv").c_str(), "w");
         if (!report) { report = stdout; return 2; }
         std::puts("[headless-startup] directories_ready");
+        Eden::Performance::ReportDirectMemory("startup");
 #ifdef EDEN_DEV_VULKAN
         if (std::filesystem::exists(Eden::AppFile("sdk-audit.txt"))) {
             Eden::AuditSdk();
@@ -401,6 +408,7 @@ int main(int argc, char** argv) {
             std::printf("EDEN_STAGE backend=%s phase=%s mono_ns=%lld\n",
                         Eden::BackendName(backend), name, static_cast<long long>(mono_ns));
             ps5_opengl_heap_snapshot(name, 0);
+            Eden::Performance::ReportDirectMemory(name);
             std::fflush(stdout);
 #else
             const auto heap = mallinfo2();
@@ -985,6 +993,8 @@ int main(int argc, char** argv) {
 #endif
                     completion->wake.wait_for(lock, std::chrono::milliseconds(wait_ms), completed);
                     const bool guest_exited = completion->exited;
+                    // What the pool had left when rendering failed (before teardown frees it).
+                    if (completion->failure) Eden::Performance::ReportDirectMemory("failure");
                     return_to_menu = completion->return_to_menu;
                     session_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - session_start).count();
                     if (!guest_exited && !game) {

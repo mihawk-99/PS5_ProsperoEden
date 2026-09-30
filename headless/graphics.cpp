@@ -526,6 +526,7 @@ void GraphicsWindow::OnFrameDisplayed() {
                     frame_sample_count, now - frame_sample_start,
                     frame_sample_count / (now - frame_sample_start),
                     frame_sample_worst * 1000.0, frame_total);
+                Eden::Performance::ReportDirectMemory("frame");
 #ifdef EDEN_DEV_PROFILE
                 std::printf("EDEN_VULKAN_INTERVALS v1=%u v2=%u v3=%u v4plus=%u\n", interval_hist[0],
                             interval_hist[1], interval_hist[2], interval_hist[3]);
