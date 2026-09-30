@@ -145,29 +145,17 @@ int eden_game_build_id(const char* rom_path, char* hex, size_t hex_capacity) {
         std::string path = rom_path;
         std::transform(path.begin(), path.end(), path.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        // A package that carries the game's update (a merged "base + update" dump) runs the
-        // update's program, so its build ID is the one patches are made for.
-        std::shared_ptr<FileSys::NSP> package;
+        std::shared_ptr<FileSys::NCA> program;
         if (path.ends_with(".xci")) {
             FileSys::XCI image(file);
             if (image.GetStatus() != Loader::ResultStatus::Success) return 0;
-            package = image.GetSecurePartitionNSP();
+            program = image.GetNCAByType(FileSys::NCAContentType::Program);
         } else if (path.ends_with(".nsp")) {
-            package = std::make_shared<FileSys::NSP>(file);
+            FileSys::NSP package(file);
+            if (package.GetStatus() != Loader::ResultStatus::Success) return 0;
+            program = package.GetNCA(package.GetProgramTitleID(), FileSys::ContentRecordType::Program);
         }
-        if (!package || package->GetStatus() != Loader::ResultStatus::Success) return 0;
-        const u64 base = FileSys::GetBaseTitleID(package->GetProgramTitleID());
-        std::shared_ptr<FileSys::NCA> program;
-        for (const auto& nca : package->GetNCAsCollapsed()) {
-            if (!nca || nca->GetStatus() != Loader::ResultStatus::Success ||
-                nca->GetType() != FileSys::NCAContentType::Program) continue;
-            if (nca->GetTitleId() == (base | 0x800)) {
-                program = nca;
-                break;
-            }
-            if (nca->GetTitleId() == base && !program) program = nca;
-        }
-        if (!program) return 0;
+        if (!program || program->GetStatus() != Loader::ResultStatus::Success) return 0;
         const auto exefs = program->GetExeFS();
         const auto main = exefs ? exefs->GetFile("main") : FileSys::VirtualFile{};
         // NSO header: "NSO0" magic, the 0x20-byte module ID at 0x40.
