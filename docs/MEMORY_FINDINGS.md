@@ -85,3 +85,23 @@ commits, or one table level more).
   `/data/homebrew/PPSA99008`.
 - **Mesa's disk cache is off when the real and effective ids differ**: elevation left the
   effective group at 1, so RADV never kept a shader cache. The frontend now matches them.
+
+## After the power-off: homebrew no longer launches (2026-09-30, evening)
+
+After the console was restarted, no homebrew title launched, with etaHEN or with OnionHEN.
+The system launcher refuses each one while reading its application information:
+`getAppInfoFromParamJson` then `launchApp` return `0x80bd000a` (`LaunchFlowError`), for
+ProsperoEden and RetroArch alike. kstuff and ShadowMountPlus both still mount the folders
+(`/data/homebrew/<id> -> /system_ex/app/<id>`), and ShadowMountPlus reports "game info
+unavailable" for every title in `/data/homebrew`.
+
+Read-only checks over FTP found **read errors across `/data`**: `550 Input/output error` for the
+`param.json` of titles last written on Jan 20 (console clock), ProsperoEden's eboot and
+settings, and ShadowMountPlus's own config and logs. ProsperoEden's `param.json` read back with
+its correct length but different bytes from the installed file (its end no longer parses).
+`/system_data` (the system's `app.db`) still read normally. So the internal storage's `/data`
+filesystem, where all homebrew lives, was damaged, most likely by the unclean power-off.
+ShadowMountPlus was running at the time; its README warns that mounting can cause shutdown
+problems and data corruption on internal drives.
+
+Nothing more was written to the console after this was found.
