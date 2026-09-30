@@ -310,6 +310,39 @@ extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::in
                                                            std::size_t*);
 #endif
 
+void ReportDirectMemory(const char* when) {
+#ifdef PS5_NATIVE
+    const std::int64_t total = sceKernelGetDirectMemorySize();
+    if (total <= 0) return;
+    // The kernel answers with the largest free range in a span; the ranges either side of it
+    // are searched in turn (a bounded stack: the pool has at most a few hundred free ranges).
+    std::uint64_t free_bytes = 0, largest_bytes = 0;
+    unsigned ranges = 0;
+    std::vector<std::pair<std::int64_t, std::int64_t>> spans{{0, total}};
+    while (!spans.empty() && ranges < 4096) {
+        const auto [low, high] = spans.back();
+        spans.pop_back();
+        std::int64_t start = 0;
+        std::size_t size = 0;
+        if (high - low < 0x4000 || sceKernelAvailableDirectMemorySize(low, high, 0x4000, &start, &size) != 0 ||
+            size == 0)
+            continue;
+        ++ranges;
+        free_bytes += size;
+        largest_bytes = std::max<std::uint64_t>(largest_bytes, size);
+        spans.emplace_back(low, start);
+        spans.emplace_back(start + static_cast<std::int64_t>(size), high);
+    }
+    std::printf("EDEN_MEMORY when=%s pool_mib=%lld free_mib=%llu largest_free_mib=%llu free_ranges=%u vulkan_mib=%llu\n",
+                when, static_cast<long long>(total >> 20), static_cast<unsigned long long>(free_bytes >> 20),
+                static_cast<unsigned long long>(largest_bytes >> 20), ranges,
+                vulkan_memory_used.load(std::memory_order_relaxed) >> 20);
+    std::fflush(stdout);
+#else
+    (void)when;
+#endif
+}
+
 namespace {
 std::mutex hle_mutex;
 // Keyed by the service's name pointer (one per service object) and command id.

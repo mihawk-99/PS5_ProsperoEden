@@ -643,6 +643,9 @@ adapt('src/video_core/texture_cache/texture_cache.h',
     ('namespace VideoCommon {', '#include "performance.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
     (download_prefix, download_prefix + (port / 'vulkan_download_batch.inc').read_text() + '\n'),
     (gc_original, gc),
+    ('        total_used_memory = runtime.GetDeviceMemoryUsage();',
+     '        total_used_memory = runtime.GetDeviceMemoryUsage();\n'
+     '        ::Eden::Performance::vulkan_memory_used.store(total_used_memory, std::memory_order_relaxed);'),
     # RADV reports all Vulkan allocations, not just cached textures. A game's
     # measured ~1.9 GiB working set triggered dirty eviction at the old 1.6 GiB
     # threshold despite a 4 GiB budget. Retain 40% headroom; keep the original

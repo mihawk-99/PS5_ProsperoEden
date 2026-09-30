@@ -14,6 +14,11 @@ void SetSecondaryPlacement(bool enabled);
 void PlatformChecks();
 // Main thread only, between GPU readiness and guest shutdown.
 void Snapshot();
+// Free direct memory (the pool guest RAM, the JIT, the heap and RADV share): the total, the
+// largest contiguous range and the number of free ranges, as one EDEN_MEMORY line.
+void ReportDirectMemory(const char* when);
+// What the Vulkan heaps hold (VK_EXT_memory_budget usage), as the texture cache last read it.
+inline std::atomic<unsigned long long> vulkan_memory_used{0};
 // GPU worker only: firmware rejects cross-thread CPU-time sampling.
 void SampleGpuFrame(unsigned frame);
 #ifdef EDEN_DEV_PROFILE
