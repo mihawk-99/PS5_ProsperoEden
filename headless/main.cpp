@@ -614,7 +614,17 @@ int main(int argc, char** argv) {
             // frame is 3840x2160; the OpenGL surface is 1080): bilinear when enlarging, 1:1
             // when equal, an area average when reducing (8K on a 4K frame is supersampling).
             const bool docked = Settings::IsDockedMode();
-            const auto resolution = Eden::LoadPreferences().resolution;
+            auto resolution = Eden::LoadPreferences().resolution;
+#if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)
+            // A game that ran out of memory above some resolution starts at its limit.
+            const auto limit = Eden::LoadGameResolutionLimit(guest ? eden_game_title_id(guest) : 0);
+            if (static_cast<int>(limit) < static_cast<int>(resolution)) {
+                Eden::Report("launch", (std::string{"Resolution limited to "} + Eden::ResolutionName(limit) +
+                                        " for this game (it ran out of memory above it)").c_str());
+                resolution = limit;
+            }
+#endif
+            Eden::SessionResolution() = resolution;
             const auto scale = Eden::ScaleFor(resolution, docked);
             using Setup = Settings::ResolutionSetup;
             Setup setup = Setup::Res1X;
@@ -1026,11 +1036,28 @@ int main(int argc, char** argv) {
                 if (system.IsPoweredOn()) return 1;
                 passed("core_shutdown");
                 if (completion->failure) {
+                    std::string what;
                     try { std::rethrow_exception(completion->failure); }
-                    catch (const std::exception& error) {
-                        throw std::runtime_error(std::string("Rendering failed: ") + error.what() +
-                            ". Try another graphics backend in Settings, then reopen the game.");
-                    }
+                    catch (const std::exception& error) { what = error.what(); }
+#if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)
+                    // Out of GPU memory above 1080p: save a limit one step lower for this game
+                    // and restart it there, rather than end the session.
+                    const auto session = Eden::SessionResolution();
+                    const auto title_id = eden_game_title_id(selected_game.c_str());
+                    if (game && title_id && what.find("OUT_OF_DEVICE_MEMORY") != std::string::npos &&
+                        static_cast<int>(session) > static_cast<int>(Eden::RenderResolution::P1080)) {
+                        const auto lower = Eden::kRenderResolutions[static_cast<int>(session) - 1];
+                        if (!Eden::SaveGameResolutionLimit(title_id, lower))
+                            Eden::Report("settings", "Could not save the game's resolution limit");
+                        relaunch_game = selected_game;
+                        return_to_menu = true;
+                        Eden::Report("out of memory", (std::string{"Not enough memory for "} +
+                            Eden::ResolutionName(session) + " in this game; restarting at " +
+                            Eden::ResolutionName(lower)).c_str());
+                    } else
+#endif
+                    throw std::runtime_error("Rendering failed: " + what +
+                        ". Try another graphics backend in Settings, then reopen the game.");
                 }
                 if (!completion->guest_fault.empty()) {
                     // A game can run its save-load completion before its own callback exists

@@ -645,7 +645,24 @@ adapt('src/video_core/texture_cache/texture_cache.h',
     (gc_original, gc),
     ('        total_used_memory = runtime.GetDeviceMemoryUsage();',
      '        total_used_memory = runtime.GetDeviceMemoryUsage();\n'
-     '        ::Eden::Performance::vulkan_memory_used.store(total_used_memory, std::memory_order_relaxed);'),
+     '        ::Eden::Performance::vulkan_memory_used.store(total_used_memory, std::memory_order_relaxed);\n'
+     # The limits from what the pool can still give, not the heaps' size: the emulator holds
+     # much of the 12 GiB before the GPU, so the cache ran out of memory before it evicted.
+     '        if constexpr (std::is_same_v<Runtime, Vulkan::TextureCacheRuntime>) {\n'
+     '            if (const s64 limit = static_cast<s64>(::Eden::Performance::GpuMemoryLimit(total_used_memory));\n'
+     '                limit > 0) {\n'
+     '                const s64 device_local_memory =\n'
+     '                    (std::min)(limit, static_cast<s64>(runtime.GetDeviceLocalMemory()));\n'
+     '                const s64 mem_threshold = (std::min)(device_local_memory, TARGET_THRESHOLD);\n'
+     '                const s64 min_vacancy_expected = (4 * mem_threshold) / 10;\n'
+     '                const s64 min_vacancy_critical = (2 * mem_threshold) / 10;\n'
+     '                expected_memory = static_cast<u64>((std::max)((std::min)(\n'
+     '                    device_local_memory - min_vacancy_expected, device_local_memory - s64(1_GiB)), DEFAULT_EXPECTED_MEMORY));\n'
+     '                critical_memory = static_cast<u64>((std::max)((std::min)(\n'
+     '                    device_local_memory - min_vacancy_critical, device_local_memory - s64(512_MiB)), DEFAULT_CRITICAL_MEMORY));\n'
+     '                minimum_memory = static_cast<u64>((std::max)(s64{0}, (device_local_memory - mem_threshold) / 2));\n'
+     '            }\n'
+     '        }'),
     # RADV reports all Vulkan allocations, not just cached textures. A game's
     # measured ~1.9 GiB working set triggered dirty eviction at the old 1.6 GiB
     # threshold despite a 4 GiB budget. Retain 40% headroom; keep the original

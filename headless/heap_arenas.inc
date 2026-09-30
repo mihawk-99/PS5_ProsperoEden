@@ -10,8 +10,18 @@
  * a lazily created 8 MiB arena allocated *from* it, aligned to its own 8 MiB
  * slot. Small requests use the thread's arena and fall back to the main space;
  * frees and reallocs find the owner in O(1) from the address's slot.
+ *
+ * The heap's address range is reserved whole, but direct memory backs it a segment
+ * at a time (the first 512 MiB, then 256 MiB or the request's size), each segment
+ * its own mspace: the 3 GiB committed up front left the GPU under 3 GiB of the 12
+ * GiB pool while Super Mario Odyssey used ~1 GiB of heap, and 8K rendering ran out.
+ * The "main space" is the list of segments, newest first.
  */
 #include <pthread.h>
+#include <unistd.h>
+#ifdef __PROSPERO__
+int sceKernelDebugOutText(int, const char *);
+#endif
 #include <string.h>
 
 #define EDEN_HEAP_ARENA_SHIFT 23u /* 8 MiB arenas and slots (<=256 MiB reserved) */
@@ -23,6 +33,22 @@
 #define EDEN_HEAP_SMALL_REQUEST (256u * 1024u)
 
 static void *_Atomic eden_heap_slots[EDEN_HEAP_SLOTS]; /* arena mspace owning each slot */
+static void *_Atomic eden_heap_slot_segments[EDEN_HEAP_SLOTS]; /* segment mspace of each slot */
+
+#define EDEN_HEAP_FIRST_SEGMENT (512u * 1024u * 1024u)
+#define EDEN_HEAP_GROWTH (256u * 1024u * 1024u)
+#define EDEN_HEAP_MAX_SEGMENTS 64u
+void *eden_heap_reserve(size_t);
+int eden_heap_commit(void *, size_t);
+static void *_Atomic eden_heap_segment_spaces[EDEN_HEAP_MAX_SEGMENTS];
+static atomic_uint eden_heap_segment_count;
+static size_t eden_heap_committed; /* under eden_heap_grow_lock */
+static atomic_flag eden_heap_grow_lock = ATOMIC_FLAG_INIT;
+static atomic_size_t eden_heap_committed_bytes;
+
+size_t eden_heap_committed_total(void) {
+  return atomic_load_explicit(&eden_heap_committed_bytes, memory_order_relaxed);
+}
 static void *eden_heap_arena_list[EDEN_HEAP_MAX_ARENAS];
 static atomic_uint eden_heap_arena_count;
 static atomic_uint eden_heap_next_shared;
@@ -47,21 +73,26 @@ static int ps5_heap_ready(void) {
           memory_order_acquire))
     return expected == 2;
 
-  void *base = eden_heap_pages(PS5_OPENGL_HEAP_SIZE);
-  if (base == NULL) {
+  void *base = eden_heap_reserve(PS5_OPENGL_HEAP_SIZE);
+  if (base == NULL || eden_heap_commit(base, EDEN_HEAP_FIRST_SEGMENT) != 0) {
     atomic_store_explicit(&ps5_heap_state, -1, memory_order_release);
     return 0;
   }
 
   ps5_heap_base = base;
   ps5_heap_mspace =
-      sceLibcMspaceCreate("Eden-headless", base, PS5_OPENGL_HEAP_SIZE, 0);
+      sceLibcMspaceCreate("Eden-headless", base, EDEN_HEAP_FIRST_SEGMENT, 0);
   if (ps5_heap_mspace == NULL) {
     ps5_heap_base = NULL;
-    eden_heap_pages_free(base, PS5_OPENGL_HEAP_SIZE);
     atomic_store_explicit(&ps5_heap_state, -1, memory_order_release);
     return 0;
   }
+  for (size_t slot = 0; slot < (EDEN_HEAP_FIRST_SEGMENT >> EDEN_HEAP_ARENA_SHIFT); ++slot)
+    atomic_store_explicit(&eden_heap_slot_segments[slot], ps5_heap_mspace, memory_order_relaxed);
+  atomic_store_explicit(&eden_heap_segment_spaces[0], ps5_heap_mspace, memory_order_relaxed);
+  atomic_store_explicit(&eden_heap_segment_count, 1, memory_order_release);
+  eden_heap_committed = EDEN_HEAP_FIRST_SEGMENT;
+  atomic_store_explicit(&eden_heap_committed_bytes, eden_heap_committed, memory_order_relaxed);
   /* libthr keeps specific data in its own storage; no recursion into malloc. */
   eden_heap_arena_key_valid = pthread_key_create(&eden_heap_arena_key, NULL) == 0;
 
@@ -83,11 +114,92 @@ static uintptr_t eden_heap_slot(const void *address) {
          ((uintptr_t)ps5_heap_base >> EDEN_HEAP_ARENA_SHIFT);
 }
 
-/* The mspace owning an owned block: its slot's arena, else the main space. */
+/* The mspace owning an owned block: its slot's arena, else its slot's segment. */
 static void *eden_heap_owner(const void *address) {
   const uintptr_t slot = eden_heap_slot(address);
   void *arena = atomic_load_explicit(&eden_heap_slots[slot], memory_order_acquire);
-  return arena != NULL ? arena : ps5_heap_mspace;
+  return arena != NULL ? arena
+                       : atomic_load_explicit(&eden_heap_slot_segments[slot], memory_order_acquire);
+}
+
+/* "EDEN_HEAP_SEGMENT at=<hex> bytes=<hex> for=<hex>" to stderr, without stdio (it may allocate). */
+static void eden_heap_log_segment(const void *at, size_t size, size_t request) {
+  char line[128];
+  size_t length = 0;
+  const char *parts[] = {"EDEN_HEAP_SEGMENT at=", " bytes=", " for="};
+  const uintptr_t values[] = {(uintptr_t)at, size, request};
+  for (int part = 0; part < 3; ++part) {
+    for (const char *c = parts[part]; *c; ++c)
+      line[length++] = *c;
+    for (int shift = 60; shift >= 0; shift -= 4)
+      line[length++] = "0123456789abcdef"[(values[part] >> shift) & 15];
+  }
+  line[length++] = '\n';
+  line[length] = '\0';
+  (void)!write(2, line, length);
+#ifdef __PROSPERO__
+  (void)sceKernelDebugOutText(0, line);
+#endif
+}
+
+/* Back the next part of the reservation with direct memory, as a new segment with room for
+ * a request of `bytes`. 1 when a segment was added (by this or another thread). */
+static int eden_heap_grow(size_t bytes, unsigned seen) {
+  while (atomic_flag_test_and_set_explicit(&eden_heap_grow_lock, memory_order_acquire)) {}
+  int grown = 0;
+  const unsigned count = atomic_load_explicit(&eden_heap_segment_count, memory_order_acquire);
+  if (count != seen) {
+    grown = 1; /* another thread added one meanwhile: try it first */
+  } else if (count < EDEN_HEAP_MAX_SEGMENTS) {
+    /* Room for the request, its header and alignment, in 8 MiB (slot) units. */
+    size_t size = bytes + (bytes >> 4) + (2u << 20);
+    size = (size + EDEN_HEAP_ARENA_SIZE - 1) & ~(size_t)(EDEN_HEAP_ARENA_SIZE - 1);
+    if (size < EDEN_HEAP_GROWTH)
+      size = EDEN_HEAP_GROWTH;
+    if (size <= PS5_OPENGL_HEAP_SIZE - eden_heap_committed) {
+      char *at = (char *)ps5_heap_base + eden_heap_committed;
+      if (eden_heap_commit(at, size) == 0) {
+        void *space = sceLibcMspaceCreate("Eden-segment", at, size, 0);
+        if (space != NULL) {
+          const uintptr_t first = eden_heap_slot(at);
+          for (uintptr_t slot = first; slot < first + (size >> EDEN_HEAP_ARENA_SHIFT); ++slot)
+            atomic_store_explicit(&eden_heap_slot_segments[slot], space, memory_order_release);
+          atomic_store_explicit(&eden_heap_segment_spaces[count], space, memory_order_release);
+          eden_heap_log_segment(at, size, bytes);
+          eden_heap_committed += size;
+          atomic_store_explicit(&eden_heap_committed_bytes, eden_heap_committed, memory_order_relaxed);
+          atomic_store_explicit(&eden_heap_segment_count, count + 1, memory_order_release);
+          grown = 1;
+        }
+        /* A segment whose mspace failed stays committed and unused: never observed. */
+      }
+    }
+  }
+  atomic_flag_clear_explicit(&eden_heap_grow_lock, memory_order_release);
+  return grown;
+}
+
+/* An allocation from the segments, newest first, growing the heap when none has room.
+ * alignment 0: malloc or calloc (zero); otherwise posix_memalign. */
+static void *eden_heap_main_allocate(size_t count, size_t size, size_t alignment, int zero) {
+  const size_t bytes = count * size;
+  for (;;) {
+    const unsigned segments = atomic_load_explicit(&eden_heap_segment_count, memory_order_acquire);
+    for (unsigned index = segments; index-- > 0;) {
+      void *space = atomic_load_explicit(&eden_heap_segment_spaces[index], memory_order_acquire);
+      void *address = NULL;
+      if (alignment != 0) {
+        if (sceLibcMspacePosixMemalign(space, &address, alignment, bytes) != 0)
+          address = NULL;
+      } else {
+        address = zero ? sceLibcMspaceCalloc(space, count, size) : sceLibcMspaceMalloc(space, bytes);
+      }
+      if (address != NULL)
+        return address;
+    }
+    if (!eden_heap_grow(bytes + alignment, segments))
+      return NULL;
+  }
 }
 
 /* Allocate and register one arena block from the main space (NULL on failure). */
@@ -96,9 +208,8 @@ static void *eden_heap_create_arena(void) {
   void *arena = NULL;
   const unsigned count = atomic_load_explicit(&eden_heap_arena_count, memory_order_relaxed);
   if (count < EDEN_HEAP_MAX_ARENAS) {
-    void *block = NULL;
-    if (sceLibcMspacePosixMemalign(ps5_heap_mspace, &block, EDEN_HEAP_ARENA_SIZE,
-                                   EDEN_HEAP_ARENA_SIZE) == 0 && block != NULL) {
+    void *block = eden_heap_main_allocate(1, EDEN_HEAP_ARENA_SIZE, EDEN_HEAP_ARENA_SIZE, 0);
+    if (block != NULL) {
       arena = sceLibcMspaceCreate("Eden-arena", block, EDEN_HEAP_ARENA_SIZE, 0);
       if (arena != NULL) {
         const uintptr_t slot = eden_heap_slot(block);
@@ -106,7 +217,7 @@ static void *eden_heap_create_arena(void) {
         atomic_store_explicit(&eden_heap_slots[slot], arena, memory_order_release);
         atomic_store_explicit(&eden_heap_arena_count, count + 1, memory_order_release);
       } else {
-        sceLibcMspaceFree(ps5_heap_mspace, block);
+        sceLibcMspaceFree(eden_heap_owner(block), block);
       }
     }
   }
@@ -150,8 +261,7 @@ static void *eden_heap_allocate(size_t count, size_t size, int zero) {
         return address;
     }
   }
-  return zero ? sceLibcMspaceCalloc(ps5_heap_mspace, count, size)
-              : sceLibcMspaceMalloc(ps5_heap_mspace, bytes);
+  return eden_heap_main_allocate(count, size, 0, zero);
 }
 
 void *__wrap_malloc(size_t size) {
@@ -189,11 +299,7 @@ void *__wrap_realloc(void *address, size_t size) {
     atomic_fetch_add_explicit(&ps5_heap_ambiguous_zero_reallocs, 1, memory_order_relaxed);
     return NULL;
   }
-  if (owner == ps5_heap_mspace) {
-    atomic_fetch_add_explicit(&ps5_heap_failures, 1, memory_order_relaxed);
-    return NULL;
-  }
-  /* A full arena cannot grow the block in place: move it. */
+  /* A full arena or segment cannot grow the block in place: move it. */
   void *moved = eden_heap_allocate(1, size, 0);
   if (moved == NULL) {
     atomic_fetch_add_explicit(&ps5_heap_failures, 1, memory_order_relaxed);
@@ -217,14 +323,20 @@ void __wrap_free(void *address) {
 int __wrap_posix_memalign(void **address, size_t alignment, size_t size) {
   if (!ps5_heap_ready())
     return __real_posix_memalign(address, alignment, size);
+  if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0)
+    return EINVAL;
   int result = ENOMEM;
   if (size < EDEN_HEAP_SMALL_REQUEST && alignment <= 4096) {
     void *arena = eden_heap_thread_arena();
     if (arena != NULL)
       result = sceLibcMspacePosixMemalign(arena, address, alignment, size);
   }
-  if (result == ENOMEM)
-    result = sceLibcMspacePosixMemalign(ps5_heap_mspace, address, alignment, size);
+  if (result == ENOMEM) {
+    void *block = eden_heap_main_allocate(1, size, alignment, 0);
+    result = block != NULL ? 0 : ENOMEM;
+    if (block != NULL)
+      *address = block;
+  }
   if (result == 0)
     ps5_heap_record_allocation(*address, size != 0);
   else if (result == ENOMEM)
