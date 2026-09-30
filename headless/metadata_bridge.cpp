@@ -134,6 +134,42 @@ uint64_t eden_game_title_id(const char* rom_path) {
     return 0;
 }
 
+int eden_game_build_id(const char* rom_path, char* hex, size_t hex_capacity) {
+    if (!rom_path || !hex || hex_capacity < 65) return 0;
+    hex[0] = '\0';
+    try {
+        Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, Eden::AssetsPath("keys"));
+        FileSys::RealVfsFilesystem vfs;
+        const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);
+        if (!file) return 0;
+        std::string path = rom_path;
+        std::transform(path.begin(), path.end(), path.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::shared_ptr<FileSys::NCA> program;
+        if (path.ends_with(".xci")) {
+            FileSys::XCI image(file);
+            if (image.GetStatus() != Loader::ResultStatus::Success) return 0;
+            program = image.GetNCAByType(FileSys::NCAContentType::Program);
+        } else if (path.ends_with(".nsp")) {
+            FileSys::NSP package(file);
+            if (package.GetStatus() != Loader::ResultStatus::Success) return 0;
+            program = package.GetNCA(package.GetProgramTitleID(), FileSys::ContentRecordType::Program);
+        }
+        if (!program || program->GetStatus() != Loader::ResultStatus::Success) return 0;
+        const auto exefs = program->GetExeFS();
+        const auto main = exefs ? exefs->GetFile("main") : FileSys::VirtualFile{};
+        // NSO header: "NSO0" magic, the 0x20-byte module ID at 0x40.
+        if (!main || main->GetSize() < 0x60) return 0;
+        const auto header = main->ReadBytes(0x60);
+        if (header.size() != 0x60 || std::memcmp(header.data(), "NSO0", 4) != 0) return 0;
+        for (std::size_t i = 0; i < 0x20; ++i)
+            std::snprintf(hex + i * 2, 3, "%02X", header[0x40 + i]);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 int eden_extract_game_metadata(const char* rom_path, const char* keys_dir,
                                const char* cover_tga_path, char* title,
                                size_t title_capacity) {

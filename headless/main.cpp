@@ -31,6 +31,9 @@
 #include "log_pipe.h"
 #include "controller_applet.h"
 #include "preferences.h"
+#ifdef PS5_NATIVE
+#include "patch_apply.h"
+#endif
 #include "metadata_bridge.h"
 #ifdef EDEN_PS5_OPENGL
 #include "graphics.h"
@@ -616,6 +619,21 @@ int main(int argc, char** argv) {
             const bool docked = Settings::IsDockedMode();
             const auto resolution = Eden::LoadPreferences().resolution;
             Eden::SessionResolution() = resolution;
+#if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)
+            // The game's chosen patches (headless/patch_library.h) become one mod folder Eden applies.
+            if (const auto title_id = guest ? eden_game_title_id(guest) : 0) {
+                char build_id[65]{};
+                const bool known = eden_game_build_id(guest, build_id, sizeof(build_id)) != 0;
+                const auto chosen = Eden::LoadGamePatches(title_id);
+                const int applied = Eden::Patches::Apply(title_id, known ? build_id : "", chosen);
+                if (!chosen.empty() || applied != 0) {
+                    const std::string detail = "Patches: " + std::to_string(applied) + " of " +
+                        std::to_string(chosen.size()) + " chosen apply to build " +
+                        (known ? std::string(build_id, 16) : std::string{"unknown"});
+                    Eden::Report("launch", detail.c_str());
+                }
+            }
+#endif
             const auto scale = Eden::ScaleFor(resolution, docked);
             using Setup = Settings::ResolutionSetup;
             Setup setup = Setup::Res1X;

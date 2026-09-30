@@ -3,6 +3,7 @@
 #include "diagnostics.h"
 #include "metadata_bridge.h"
 #include "native_directory.h"
+#include "patch_apply.h"
 
 #include <RmlUi/Core/Element.h>
 #include <RmlUi/Core/Elements/ElementFormControlSelect.h>
@@ -329,6 +330,10 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
         HandleFilesInput(event);
         return;
     }
+    if (dialog_ == 9) {
+        HandlePatchesInput(event);
+        return;
+    }
     if (dialog_ >= 3) {
         auto* select = static_cast<Rml::ElementFormControlSelect*>(document_->GetElementById("video-backend"));
         if (dialog_ == 3 && select->IsSelectBoxVisible()) {
@@ -406,6 +411,8 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
             SetText(document_, "game-mode-hint-text", saved ? "Saved for this game. Applies on next launch." :
                     "Could not save console mode. Please try again.");
         }
+        else if (dialog_ == 1 && setup_ready_ && count > 0 && event.key == RADIO_INPUT_TRIANGLE)
+            OpenPatches(dialog_selected_);
         else if (dialog_ == 1 && setup_ready_ && count > 0 && event.key == RADIO_INPUT_CROSS)
             selected_game_ = Eden::AssetsPath("roms/" + games[dialog_selected_].path);
         else if (count > 0 && event.key == RADIO_INPUT_UP) {
@@ -561,6 +568,7 @@ void EdenApp::Close() {
     SetClass(document_, "rom-dialog", "open", false);
     SetClass(document_, "settings-dialog", "open", false);
     SetClass(document_, "files-dialog", "open", false);
+    SetClass(document_, "patches-dialog", "open", false);
     for (const char* element : {"header", "menu", "last-played-card", "recent-section", "startup-status", "footer"})
         SetClass(document_, element, "library-hidden", false);
     dialog_ = 0;
@@ -729,3 +737,94 @@ void EdenApp::UpdateFiles() {
             "Keep keys, firmware and roms folders together. TRIANGLE uses the folder shown." :
             files_message_.c_str());
 }
+
+void EdenApp::OpenPatches(int game) {
+    const GameInfo& info = games.at(game);
+    patches_title_ = info.title_id;
+    patches_game_ = info.name;
+    patches_build_.clear();
+    patches_.clear();
+    patches_chosen_.clear();
+    patches_selected_ = 0;
+    patches_message_.clear();
+    char build[65]{};
+    if (patches_title_ && eden_game_build_id(Eden::AssetsPath("roms/" + info.path).c_str(), build, sizeof(build)))
+        patches_build_ = build;
+    if (!patches_build_.empty()) patches_ = Eden::Patches::ForGame(patches_title_, patches_build_);
+    for (const auto& id : Eden::LoadGamePatches(patches_title_)) patches_chosen_.insert(id);
+    SetClass(document_, "patches-dialog", "open", true);
+    dialog_ = 9;
+    UpdatePatches();
+}
+
+void EdenApp::HandlePatchesInput(const radio_input_event_t& event) {
+    const int count = static_cast<int>(patches_.size());
+    if (event.key == RADIO_INPUT_CIRCLE) {
+        SetClass(document_, "patches-dialog", "open", false);
+        dialog_ = 1;
+        UpdateDialog();
+        return;
+    }
+    if (event.key == RADIO_INPUT_UP && count) {
+        patches_selected_ = (patches_selected_ + count - 1) % count;
+    } else if (event.key == RADIO_INPUT_DOWN && count) {
+        patches_selected_ = (patches_selected_ + 1) % count;
+    } else if ((event.key == RADIO_INPUT_L1 || event.key == RADIO_INPUT_R1) && count) {
+        patches_selected_ = std::clamp(patches_selected_ + (event.key == RADIO_INPUT_R1 ? 6 : -6), 0, count - 1);
+    } else if (event.key == RADIO_INPUT_CROSS && count) {
+        // Choices for other builds of the game stay saved; this page changes this build's.
+        Eden::Patches::Toggle(patches_, patches_chosen_, static_cast<std::size_t>(patches_selected_));
+        const bool saved = Eden::SaveGamePatches(patches_title_, {patches_chosen_.begin(), patches_chosen_.end()});
+        if (!saved) Eden::Report("settings", "Could not save the game's patches");
+        patches_message_ = saved ? "Saved. Applies the next time the game starts." : "Could not save. Please try again.";
+    } else {
+        return;
+    }
+    UpdatePatches();
+}
+
+void EdenApp::UpdatePatches() {
+    static constexpr int kRows = 6;
+    const int count = static_cast<int>(patches_.size());
+    const int scroll = patches_selected_ < kRows ? 0 : patches_selected_ - (kRows - 1);
+    int chosen_here = 0;
+    for (const auto& entry : patches_) chosen_here += patches_chosen_.contains(entry.id);
+    for (int row = 0; row < kRows; ++row) {
+        const int index = scroll + row;
+        const std::string id = "patch-row-" + std::to_string(row);
+        const std::string name = "patch-name-" + std::to_string(row);
+        const std::string meta = "patch-meta-" + std::to_string(row);
+        const bool present = index < count;
+        SetClass(document_, id.c_str(), "focused", present && index == patches_selected_);
+        SetClass(document_, id.c_str(), "offscreen", !present);
+        SetClass(document_, id.c_str(), "chosen", present && patches_chosen_.contains(patches_[index].id));
+        SetText(document_, name.c_str(), present ? patches_[index].name.c_str() : "");
+        SetText(document_, meta.c_str(), !present ? "" :
+                patches_[index].kind == Eden::Patches::Kind::Cheat ? "CHEAT" : "PCHTXT");
+    }
+    SetClass(document_, "patches-empty", "visible", count == 0);
+    SetClass(document_, "patches-scrollbar", "offscreen", count <= kRows);
+    if (count > kRows) if (Rml::Element* thumb = document_->GetElementById("patches-scrollbar-thumb")) {
+        char top[24];
+        std::snprintf(top, sizeof(top), "%dpx", 408 * scroll / (count - kRows));
+        thumb->SetProperty("top", top);
+    }
+    char position[24];
+    std::snprintf(position, sizeof(position), "%d OF %d", count ? patches_selected_ + 1 : 0, count);
+    SetText(document_, "patches-position", position);
+    SetText(document_, "patches-source", count ? ShortPath(patches_[patches_selected_].source, 60).c_str() : "");
+    SetText(document_, "patches-game", patches_game_.c_str());
+    SetText(document_, "patches-build", patches_build_.empty() ? "Unreadable" : patches_build_.substr(0, 16).c_str());
+    SetText(document_, "patches-found", (std::to_string(count) + (count == 1 ? " patch" : " patches")).c_str());
+    SetText(document_, "patches-chosen", std::to_string(chosen_here).c_str());
+    SetClass(document_, "patches-chosen", "ready", chosen_here > 0);
+    SetText(document_, "patches-folder", ShortPath(Eden::PatchesDir(), 40).c_str());
+    std::string message = patches_message_;
+    if (message.empty())
+        message = patches_build_.empty() ? "This game's version could not be read, so no patch can be matched to it." :
+            count == 0 ? "Copy patch collections into the patch folder as downloaded (a cheat database's titles "
+                         "folder, .pchtxt mods), then open this page again." :
+            "Frame rate and resolution choices replace each other. Patches apply when the game starts.";
+    SetText(document_, "patches-message", message.c_str());
+}
+
