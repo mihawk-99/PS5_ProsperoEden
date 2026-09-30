@@ -72,6 +72,23 @@ set_property(SOURCE
     "${PROJECT_SOURCE_DIR}/src/video_core/vulkan_common/vulkan_device.cpp"
     TARGET_DIRECTORY video_core APPEND PROPERTY OBJECT_DEPENDS
     "${PORT_BUILD_DIR}/include/video_core/vulkan_common/vulkan_wrapper.h")
+# GraphicsPipeline gained the optimised-rebuild members (prepare-vulkan-port.py): rebuild every
+# source that sees the class once, since existing depfiles still name the upstream header.
+set_property(SOURCE
+    "${PROJECT_SOURCE_DIR}/src/video_core/video_core.cpp"
+    "${PROJECT_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_turbo_mode.cpp"
+    "${PROJECT_SOURCE_DIR}/src/video_core/renderer_vulkan/present/layer.cpp"
+    "${PORT_BUILD_DIR}/vulkan_renderer.cpp" "${PORT_BUILD_DIR}/vulkan_rasterizer.cpp"
+    "${PORT_BUILD_DIR}/vulkan_scheduler.cpp" "${PORT_BUILD_DIR}/vk_graphics_pipeline_cost.cpp"
+    "${PORT_BUILD_DIR}/vk_compute_pipeline_cost.cpp" "${PORT_BUILD_DIR}/vk_pipeline_cache_cost.cpp"
+    TARGET_DIRECTORY video_core APPEND PROPERTY OBJECT_DEPENDS
+    "${PORT_BUILD_DIR}/include/video_core/renderer_vulkan/vk_graphics_pipeline.h")
+# ccache's direct mode does not notice a new generated header that shadows an upstream one, and
+# answered with objects compiled against upstream's smaller GraphicsPipeline (heap corruption).
+# The port script's hash in the command line makes every video_core object miss when it changes.
+file(SHA256 "${PORT_ROOT}/tools/prepare-vulkan-port.py" eden_port_hash)
+string(SUBSTRING "${eden_port_hash}" 0 16 eden_port_hash)
+target_compile_definitions(video_core PRIVATE EDEN_PORT_REVISION=0x${eden_port_hash})
 target_compile_definitions(video_core PRIVATE PS5_NATIVE=1)
 # Keep incompatible Mesa/PSBC globals private to the Vulkan archives.
 if(EDEN_VULKAN_DRIVER STREQUAL "RADV")

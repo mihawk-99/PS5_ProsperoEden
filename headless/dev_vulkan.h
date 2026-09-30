@@ -34,4 +34,8 @@ inline bool compute_barriers = true;
 // 1/60 of conditions that should skip. 2 (hcr=cpu): every condition evaluated on the CPU and the
 // driver predicates the draws from constant 0/1 buffers (the driver check with exact inputs).
 inline int hcr_mode = 1;
+// Graphics pipelines are built unoptimised for their first draws and swapped for the optimised
+// build when a background thread finishes it (prepare-vulkan-port.py). dev-settings
+// fast_pipelines=off builds only the optimised pipeline, before the draw, as upstream does.
+inline bool fast_first_pipelines = true;
 } // namespace Eden::DevVulkan

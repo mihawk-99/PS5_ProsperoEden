@@ -131,6 +131,16 @@ button { margin: 0; padding: 0; border: 0px transparent; border-radius: 0px; bac
 .settings-low { top: 490px; }
 .setting-disabled { color: #b7c6b5; }
 #hud-setting { top: 330px; }
+#resolution-setting { top: 470px; }
+#resolution-setting .resolution-label { left: 36px; width: 190px; }
+#resolution-setting .resolution-option { top: 0px; width: 120px; height: 94px; opacity: 0.55; }
+#resolution-720p { left: 230px; } #resolution-1080p { left: 350px; } #resolution-4k { left: 470px; } #resolution-8k { left: 590px; }
+#resolution-setting .radio-dot { left: 0px; top: 35px; width: 18px; height: 18px; border: 3px #dfe8a6; border-radius: 12px; background-color: transparent; }
+#resolution-setting .radio-text { left: 32px; top: 0px; width: 88px; height: 94px; line-height: 92px; font-size: 24px; color: #f2f4e9; }
+#resolution-setting .resolution-option.active { opacity: 1; }
+#resolution-setting .resolution-option.active .radio-dot { background-color: #dfe8a6; }
+#resolution-setting .resolution-option.active .radio-text { color: #dfe8a6; }
+#resolution-detail { position: absolute; left: 42px; top: 570px; width: 736px; height: 34px; color: #b7c6b5; font-size: 20px; line-height: 34px; text-align: center; }
 .dimmed { opacity: 0.55; }
 .video-backend-chrome { position: absolute; left: 42px; top: 190px; width: 736px; height: 94px; }
 #video-backend { position: absolute; left: 42px; top: 190px; width: 736px; height: 94px; color: #f2f4e9; font-size: 28px; line-height: 90px; background-color: transparent; border: 0px transparent; }

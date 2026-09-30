@@ -87,7 +87,7 @@
       "about": "Mihawk's PS5_Vulkan: the RADV build and link recipes",
       "kind": "git",
       "url": "https://github.com/mihawk-99/PS5_Vulkan.git",
-      "commit": "71026e7ec1951fe72ae5b9118ff0905216a4c220",
+      "commit": "d609d712453561efc0fd78b8eb46602d49461229",
       "path": "../mihawk-vulkan-review"
     },
     {
@@ -95,12 +95,12 @@
       "about": "Mihawk's PS5 Mesa (RADV) source",
       "kind": "git",
       "url": "https://github.com/mihawk-99/PS5_Mesa.git",
-      "commit": "cedb774b27d089fa81f46add28d0a8c13ff0f7d2",
+      "commit": "0b2d6d1a61d9bbf89cf8beb88a696144f67c61f8",
       "path": "../mihawk-mesa-review"
     },
     {
       "name": "ps5-payload-sdk-fork",
-      "about": "Mihawk's PS5 Payload SDK fork used to build RADV",
+      "about": "Mihawk's PS5 Payload SDK fork used to build RADV, at the revision PS5_Vulkan pins (its tools/setup-native-dependencies.sh)",
       "kind": "git",
       "url": "https://github.com/mihawk-99/PS5_PayloadSDK.git",
       "commit": "95c08f27386fc698f6bbe21dde3030140a41d10b",

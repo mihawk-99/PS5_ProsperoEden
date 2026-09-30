@@ -20,6 +20,14 @@ This repository, [mihawk-99/PS5_ProsperoEden](https://github.com/mihawk-99/PS5_P
 - **Upstream is merged in, never rebased onto.** `main` is published, so it is never rewritten or force-pushed.
 - **Pull requests** go from a short-lived branch cut from `upstream/main`, so each one carries only its own change. The branch is deleted once upstream merges it, and the merge comes back to `main` with the next sync.
 
+Changes on this fork's `main` that upstream does not have yet:
+
+- **Resolution setting** in **Settings > Video**: 720p, 1080p, 4K or 8K, applied per console mode (handheld games reach each exactly; docked 720p is 810 lines, Eden's nearest step). The Vulkan game frame is now the display's 3840x2160 instead of a 1920x1080 frame stretched to it, and the FPS overlay shows the chosen resolution. Measured with Mario Kart 8 Deluxe docked: 4K holds 60 fps with the GPU about 19% busy; 8K mostly holds 60 with the GPU about 55% busy.
+- **Faster first draws of new effects**: graphics pipelines are built unoptimised first and swapped for the optimised build when a background thread finishes it (dev-settings `fast_pipelines=off` restores upstream's behaviour). In Mario Kart 8 Deluxe from a cold cache, draws waited 32% less for pipelines.
+- **Current PS5 Vulkan driver**: PS5 Mesa `0b2d6d1` and PS5 Vulkan `d609d71`.
+- **RADV's shader cache** lives in `/data/prosperoeden/cache/radv`.
+- **Build and install**: tools installed in `~/.local/bin` are found, the installer accepts FTP servers that answer deletes with 226, and generated header overrides can no longer be shadowed by stale ccache objects.
+
 ```bash
 git remote add upstream https://github.com/blackbearreloaded/ProsperoEden.git   # once, after cloning
 git fetch upstream && git merge upstream/main && git push origin main           # take upstream's updates

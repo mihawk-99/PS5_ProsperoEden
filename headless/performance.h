@@ -132,7 +132,7 @@ private:
 
 // Opt-in API wall times: calls may overlap across threads, so do not sum them as frame time.
 inline std::atomic<bool> vulkan_cost_enabled{false};
-inline std::array<Totals, 24> vulkan_api;
+inline std::array<Totals, 25> vulkan_api;
 inline std::optional<Timer> VulkanTimer(unsigned index) {
     if (vulkan_cost_enabled.load(std::memory_order_relaxed))
         return std::optional<Timer>{std::in_place, vulkan_api.at(index)};
@@ -147,7 +147,9 @@ inline void ReportVulkan() {
                                   "texture_gc", "texture_cpu_download", "texture_async_release",
                                   "pipeline_ready_wait", "shader_prepare", "pipeline_cache_save",
                                   "shader_pool_reset", "shader_cfg", "shader_ir",
-                                  "shader_spirv", "shader_module"};
+                                  "shader_spirv", "shader_module",
+                                  // Background optimised rebuilds (also counted in graphics_pipeline).
+                                  "graphics_pipeline_optimize"};
     static_assert(std::size(names) == vulkan_api.size());
     for (unsigned i = 0; i < vulkan_api.size(); ++i)
         std::printf("EDEN_VULKAN_COST api=%s calls=%llu ns=%llu\n", names[i],

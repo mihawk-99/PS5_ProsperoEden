@@ -6,7 +6,7 @@
 #                                    (profiling counters, dev-settings.txt A/B switches) that
 #                                    boots title ID on launch
 set -euo pipefail
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 mode=${1:?usage: tools/build-package.sh release|dev TITLE_ID}

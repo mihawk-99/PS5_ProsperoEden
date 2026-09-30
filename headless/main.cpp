@@ -17,6 +17,7 @@
 #include "sdk_audit.h"
 #endif
 #include <filesystem>
+#include <unistd.h>
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
@@ -128,7 +129,8 @@ int main(int argc, char** argv) {
         // sandbox paths.
         Eden::FilesystemAccessStatus() = static_cast<int>(elevation::request(elevation::Capability::filesystem));
         if (Eden::FilesystemAccess()) MigrateSandboxData();
-        for (const auto& folder : {Eden::UserDir(), Eden::ConfigDir(), Eden::CoversDir(), Eden::LogsDir()}) {
+        for (const auto& folder : {Eden::UserDir(), Eden::ConfigDir(), Eden::CoversDir(), Eden::LogsDir(),
+                                   Eden::CacheDir()}) {
             std::error_code folder_error;
             std::filesystem::create_directories(folder, folder_error);
         }
@@ -177,15 +179,18 @@ int main(int argc, char** argv) {
             std::abort();
         });
         {
+            // The ids too: Mesa's disk cache turns itself off when the effective and real ids differ.
             const std::string access = "status=" + std::to_string(Eden::FilesystemAccessStatus()) +
-                " app=" + Eden::AppDir() + " data=" + Eden::UserDir() + " game_files=" + Eden::AssetsDir();
+                " app=" + Eden::AppDir() + " data=" + Eden::UserDir() + " game_files=" + Eden::AssetsDir() +
+                " uid=" + std::to_string(getuid()) + "/" + std::to_string(geteuid()) +
+                " gid=" + std::to_string(getgid()) + "/" + std::to_string(getegid());
             Eden::Report("filesystem access", access.c_str());
             if (Eden::FilesystemAccess() && Eden::AssetsDir() == Eden::kDefaultAssetsDir)
                 for (const char* folder : {"/keys", "/firmware", "/roms"})
                     (void)mkdir((std::string{Eden::kDefaultAssetsDir} + folder).c_str(), 0777);
-            // RADV keeps its shader cache in the app folder (radv_ps5_platform.c's default is /app0).
-            if (Eden::FilesystemAccess())
-                setenv("MESA_SHADER_CACHE_DIR", Eden::AppFile("radv-shader-cache").c_str(), 1);
+            // RADV's shader cache goes with the rest of the app data, outside the app folder that
+            // a release is copied over (radv_ps5_platform.c's default is /app0/radv-shader-cache).
+            setenv("MESA_SHADER_CACHE_DIR", (Eden::CacheDir() + "/radv").c_str(), 1);
         }
         report = std::fopen(Eden::LogFile("result.tsv").c_str(), "w");
         if (!report) { report = stdout; return 2; }
@@ -535,6 +540,8 @@ int main(int argc, char** argv) {
                     Eden::Performance::boot_trace_end = now + std::stoll(entry.substr(colon + 1)) * 1000000;
                 } else if (entry == "hcr=eden" || entry == "hcr=exact" || entry == "hcr=cpu") {
                     Eden::DevVulkan::hcr_mode = entry == "hcr=eden" ? 0 : entry == "hcr=exact" ? 1 : 2;
+                } else if (entry == "fast_pipelines=off" || entry == "fast_pipelines=on") {
+                    Eden::DevVulkan::fast_first_pipelines = entry.ends_with("on");
                 } else if (entry == "compute_barriers=off") {
                     Eden::DevVulkan::compute_barriers = false;
                 } else if (entry == "gpu_clock=normal" || entry == "gpu_clock=boost" || entry == "gpu_clock=overclock") {
@@ -593,6 +600,33 @@ int main(int argc, char** argv) {
         Eden::Report("launch", docked ? "Console mode: Docked" : "Console mode: Handheld");
 #endif
 #endif
+        {
+            // Settings > Video > Resolution, reached through Eden's scale for this console mode.
+            // The present pass then fits the game to the output (2160 lines on Vulkan, whose
+            // frame is 3840x2160; the OpenGL surface is 1080): bilinear when enlarging, 1:1
+            // when equal, an area average when reducing (8K on a 4K frame is supersampling).
+            const bool docked = Settings::IsDockedMode();
+            const auto resolution = Eden::LoadPreferences().resolution;
+            const auto scale = Eden::ScaleFor(resolution, docked);
+            using Setup = Settings::ResolutionSetup;
+            Setup setup = Setup::Res1X;
+            if (scale.up == 3 && scale.down_shift == 2) setup = Setup::Res3_4X;
+            else if (scale.up == 3 && scale.down_shift == 1) setup = Setup::Res3_2X;
+            else if (scale.up == 2) setup = Setup::Res2X;
+            else if (scale.up == 3) setup = Setup::Res3X;
+            else if (scale.up == 4) setup = Setup::Res4X;
+            else if (scale.up == 6) setup = Setup::Res6X;
+            Settings::values.resolution_setup.SetValue(setup);
+            Settings::UpdateRescalingInfo();
+            const unsigned lines = Eden::RenderedLines(resolution, docked);
+            const unsigned output = backend == Eden::GraphicsBackend::Vulkan ? 2160 : 1080;
+            Settings::values.scaling_filter.SetValue(
+                lines > output ? Settings::ScalingFilter::Area :
+                lines == output ? Settings::ScalingFilter::NearestNeighbor : Settings::ScalingFilter::Bilinear);
+            const std::string detail = std::string{"Resolution: "} + Eden::ResolutionName(resolution) + " (" +
+                std::to_string(lines) + " lines " + (docked ? "docked" : "handheld") + ")";
+            Eden::Report("launch", detail.c_str());
+        }
         Settings::values.sink_id = Settings::AudioEngine::Null;
         Settings::values.use_multi_core = true;
 #ifdef EDEN_DEV_PROFILE

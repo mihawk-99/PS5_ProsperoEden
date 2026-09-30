@@ -653,12 +653,102 @@ adapt('src/video_core/texture_cache/texture_cache.h',
 
 # These costs sit outside vkCreateGraphicsPipelines: guest shader translation,
 # worker readiness, and background serialization can block different threads.
-for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
-    adapt(f'src/video_core/renderer_vulkan/{name}.cpp', name + '_cost.cpp', [
-        ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"'),
-        ('            std::unique_lock lock{build_mutex};',
-         '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
-    ])
+# Graphics pipelines are first built without optimisation (RADV then skips most of NIR's and
+# ACO's passes, a much shorter wait for the draw that needs it), and the optimised pipeline is
+# built on a background thread and bound from the next time the pipeline is bound. The first
+# draws use the same shaders compiled with fewer passes; nothing is skipped or drawn late.
+# dev-settings fast_pipelines=off builds the optimised pipeline only, as upstream does.
+adapt('src/video_core/renderer_vulkan/vk_graphics_pipeline.h',
+      'include/video_core/renderer_vulkan/vk_graphics_pipeline.h', [
+    ('    GraphicsPipeline(const GraphicsPipeline&) = delete;',
+     '    GraphicsPipeline(const GraphicsPipeline&) = delete;\n    ~GraphicsPipeline();'),
+    ('    void MakePipeline(VkRenderPass render_pass);',
+     '    void MakePipeline(VkRenderPass render_pass, VkPipelineCreateFlags extra_flags = 0,\n'
+     '                      vk::Pipeline* target = nullptr);\n'
+     '    void QueueOptimizedPipeline(VkRenderPass render_pass);'),
+    ('    vk::Pipeline pipeline;',
+     '    vk::Pipeline pipeline;\n'
+     '    // The optimised build of an unoptimised first pipeline (prepare-vulkan-port.py).\n'
+     '    struct OptimizeState {\n'
+     '        std::mutex mutex;\n'
+     '        std::condition_variable done;\n'
+     '        bool cancelled{false};\n'
+     '        bool running{false};\n'
+     '    };\n'
+     '    std::shared_ptr<OptimizeState> optimize_state{std::make_shared<OptimizeState>()};\n'
+     '    vk::Pipeline optimized_pipeline;\n'
+     '    std::atomic_bool optimized_ready{false};'),
+    ('#include <atomic>', '#include <atomic>\n#include <memory>'),
+])
+optimize_worker = """
+namespace {
+// Optimised rebuilds of first-use pipelines. Two threads: a burst of new pipelines (a level
+// load) catches up without taking more cores from the emulated CPU and the renderer.
+Common::ThreadWorker& OptimizeWorker() {
+    static Common::ThreadWorker worker(2, "VkPipelineOptimize");
+    return worker;
+}
+} // namespace
+
+GraphicsPipeline::~GraphicsPipeline() {
+    // A queued rebuild that has not started is dropped; one that is running is waited for.
+    std::unique_lock lock{optimize_state->mutex};
+    optimize_state->cancelled = true;
+    optimize_state->done.wait(lock, [this] { return !optimize_state->running; });
+}
+
+void GraphicsPipeline::QueueOptimizedPipeline(VkRenderPass render_pass) {
+    OptimizeWorker().QueueWork([this, state = optimize_state, render_pass] {
+        {
+            std::scoped_lock lock{state->mutex};
+            if (state->cancelled) {
+                return;
+            }
+            state->running = true;
+        }
+        try {
+            auto timer = Eden::Performance::VulkanTimer(24);
+            MakePipeline(render_pass, 0, &optimized_pipeline);
+            optimized_ready.store(true, std::memory_order_release);
+        } catch (const vk::Exception& exception) {
+            // The unoptimised pipeline stays in use.
+            LOG_WARNING(Render_Vulkan, "Optimised graphics pipeline build failed: {}", exception.what());
+        }
+        {
+            std::scoped_lock lock{state->mutex};
+            state->running = false;
+        }
+        state->done.notify_all();
+    });
+}
+
+void GraphicsPipeline::MakePipeline(VkRenderPass render_pass, VkPipelineCreateFlags extra_flags,
+                                    vk::Pipeline* target) {"""
+adapt('src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp', 'vk_graphics_pipeline_cost.cpp', [
+    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "dev_vulkan.h"'),
+    ('            std::unique_lock lock{build_mutex};',
+     '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
+    ('            MakePipeline(render_pass);',
+     '            if (::Eden::DevVulkan::fast_first_pipelines) {\n'
+     '                MakePipeline(render_pass, VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT);\n'
+     '                QueueOptimizedPipeline(render_pass);\n'
+     '            } else {\n'
+     '                MakePipeline(render_pass);\n'
+     '            }'),
+    ('void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {', optimize_worker),
+    ('    pipeline = device.GetLogical().CreateGraphicsPipeline({',
+     '    (target ? *target : pipeline) = device.GetLogical().CreateGraphicsPipeline({'),
+    ('        .flags = flags,', '        .flags = flags | extra_flags,'),
+    ('cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);',
+     'cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS,\n'
+     '                               optimized_ready.load(std::memory_order_acquire) ? *optimized_pipeline\n'
+     '                                                                               : *pipeline);'),
+])
+adapt('src/video_core/renderer_vulkan/vk_compute_pipeline.cpp', 'vk_compute_pipeline_cost.cpp', [
+    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"'),
+    ('            std::unique_lock lock{build_mutex};',
+     '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
+])
 shader_costs = [
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include <unordered_set>\n'
      '#include "performance.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),

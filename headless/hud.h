@@ -85,22 +85,27 @@ struct HudSnapshot {
     std::array<uint32_t, 24> glyphs{};
     uint32_t width{};
     uint32_t x{28}, y{30}, loading{};
+    // Output pixels per HUD pixel: the layout is drawn for 1080 lines and multiplied up
+    // on a taller frame (the Vulkan frame is 2160 lines), so it keeps its size on screen.
+    uint32_t scale{1};
 };
 inline HudSnapshot MakeLoadingSnapshot(double now) {
     char text[16] = "LOADING";
     for (unsigned i = 0; i < static_cast<unsigned>(now * 4) % 4; ++i) text[7 + i] = '.';
     return {HudText(text), 1920, 880, 530, 1};
 }
+// resolution: the Settings > Video choice in HUD glyphs ("720P", "1080P", "4K", "8K"), or empty.
 inline std::array<char, 25> FormatHudText(const HudClock& clock, double speed,
-                                          const char* backend) {
+                                          const char* backend, const char* resolution = "") {
     std::array<char, 25> text{};
-    if (clock.fps < 0) std::snprintf(text.data(), text.size(), "%s F-- S-- W--", backend);
-    else std::snprintf(text.data(), text.size(), "%s F%.0f S%.0f W%.0f",
-                       backend, clock.fps, speed, clock.worst_ms);
+    const char* gap = *resolution ? " " : "";
+    if (clock.fps < 0) std::snprintf(text.data(), text.size(), "%s%s%s F-- S-- W--", backend, gap, resolution);
+    else std::snprintf(text.data(), text.size(), "%s%s%s F%.0f S%.0f W%.0f",
+                       backend, gap, resolution, clock.fps, speed, clock.worst_ms);
     return text;
 }
-inline HudSnapshot MakeHudSnapshot(const HudClock& clock, double speed) {
-    const auto text = FormatHudText(clock, speed, "VLK");
+inline HudSnapshot MakeHudSnapshot(const HudClock& clock, double speed, const char* resolution = "") {
+    const auto text = FormatHudText(clock, speed, "VLK", resolution);
     const std::string_view value{text.data()};
     return {HudText(value), static_cast<uint32_t>(value.size() * 16 + 24)};
 }

@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <initializer_list>
+#include <iterator>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -353,7 +354,9 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
         }
         if ((dialog_ == 3 || dialog_ == 4) &&
             (event.key == RADIO_INPUT_UP || event.key == RADIO_INPUT_DOWN)) {
-            option_ = 1 - option_;
+            // Video has three rows (backend, FPS overlay, resolution), Audio two.
+            const int rows = dialog_ == 3 ? 3 : 2;
+            option_ = (option_ + (event.key == RADIO_INPUT_DOWN ? 1 : rows - 1)) % rows;
             UpdateSettings();
             return;
         }
@@ -363,6 +366,15 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
             select->Focus(); select->ShowSelectBox();
         } else if (dialog_ == 3 && option_ == 1 && (activate || adjust)) {
             preferences_.hud = !preferences_.hud; SaveSettings();
+        } else if (dialog_ == 3 && option_ == 2 && (activate || adjust)) {
+            // LEFT / RIGHT move the choice (stopping at the ends); X steps to the next one.
+            constexpr int count = static_cast<int>(std::size(Eden::kRenderResolutions));
+            int index = static_cast<int>(preferences_.resolution);
+            if (activate) index = (index + 1) % count;
+            else index = std::clamp(index + (event.key == RADIO_INPUT_RIGHT ? 1 : -1), 0, count - 1);
+            if (Eden::kRenderResolutions[index] == preferences_.resolution) return;
+            preferences_.resolution = Eden::kRenderResolutions[index];
+            SaveSettings();
         } else if (dialog_ == 4 && option_ == 0 && adjust) {
             preferences_.volume = std::clamp(preferences_.volume +
                 (event.key == RADIO_INPUT_RIGHT ? 10 : -10), 0, 100);
@@ -565,9 +577,19 @@ void EdenApp::UpdateSettings() {
     const std::string setup = eden_startup_error();
     SetText(document_, "setup-details", setup.empty() ?
         "Keys and firmware: startup checks passed. Game-specific compatibility is checked at launch." : setup.c_str());
-    SetClass(document_, "hud-setting", "focused", option_ == 1);
-    SetClass(document_, "volume-setting", "focused", option_ == 0);
-    SetClass(document_, "mute-setting", "focused", option_ == 1);
+    SetClass(document_, "hud-setting", "focused", dialog_ == 3 && option_ == 1);
+    SetClass(document_, "resolution-setting", "focused", dialog_ == 3 && option_ == 2);
+    for (const auto value : Eden::kRenderResolutions) {
+        const std::string id = "resolution-" + Eden::ResolutionKey(value);
+        SetClass(document_, id.c_str(), "active", preferences_.resolution == value);
+    }
+    // What the choice gives in each console mode (docked 720p is 810 lines: see ScaleFor).
+    const std::string detail = "Docked games render " +
+        std::to_string(Eden::RenderedLines(preferences_.resolution, true)) + " lines, handheld games " +
+        std::to_string(Eden::RenderedLines(preferences_.resolution, false)) + ".";
+    SetText(document_, "resolution-detail", detail.c_str());
+    SetClass(document_, "volume-setting", "focused", dialog_ == 4 && option_ == 0);
+    SetClass(document_, "mute-setting", "focused", dialog_ == 4 && option_ == 1);
     SetClass(document_, "video-backend-chrome", "dimmed", option_ != 0);
 }
 

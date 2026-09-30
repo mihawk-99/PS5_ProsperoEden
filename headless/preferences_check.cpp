@@ -30,6 +30,19 @@ int main() {
     assert(Eden::LoadPreferences(file).volume == 40);
     assert(Read(file).find("\"renderer\": \"opengl\"") != std::string::npos);
 
+    // Render resolution: 1080p by default, stored by name, each choice's lines per mode.
+    assert(saved.resolution == Eden::RenderResolution::P1080);
+    saved.resolution = Eden::RenderResolution::P2160;
+    assert(Eden::SavePreferences(saved, file));
+    assert(Eden::LoadPreferences(file).resolution == Eden::RenderResolution::P2160);
+    assert(Read(file).find("\"resolution\": \"4k\"") != std::string::npos);
+    const unsigned docked[] = {810, 1080, 2160, 4320}, handheld[] = {720, 1080, 2160, 4320};
+    for (int i = 0; i < 4; ++i) {
+        assert(Eden::RenderedLines(Eden::kRenderResolutions[i], true) == docked[i]);
+        assert(Eden::RenderedLines(Eden::kRenderResolutions[i], false) == handheld[i]);
+    }
+    assert(std::string(Eden::ResolutionName(Eden::RenderResolution::P4320)) == "8K");
+
     // Last and recent games.
     assert(Eden::SaveLastGame("Sample Quest [id].nsp", file));
     assert(Eden::LoadLastGame(file) == "Sample Quest [id].nsp");

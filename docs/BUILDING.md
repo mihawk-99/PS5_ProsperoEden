@@ -72,6 +72,13 @@ The `libSceAgcDriver` import facade both drivers link against is built from
 `ccache`, `make`, `nasm`, `meson`, `rsync`, `git`, `glslangValidator`, `spirv-val`, `bison`,
 `flex`, `curl`, `wget`, `unzip`, and Python 3.11 or later with `venv`, `mako` and `yaml`.
 
+The build scripts search the system directories and then `~/.local/bin`, so tools installed for
+your user alone (for example LLVM 18 on a distribution that ships a newer one) are found too.
+Host programs are compiled with `clang++-18` against the system C++ library; on a system whose
+libstdc++ is newer than LLVM 18 understands (GCC 16), point clang 18 at an older one with a
+`x86_64-pc-linux-gnu-clang++.cfg` beside the binary (`-nostdinc++` and `-isystem` lines for GCC 14's
+headers). Configuration files are chosen by target, so PS5 compilation is unaffected.
+
 ## Release workflow
 
 `.github/workflows/release.yml` runs `tools/ci/build-release.sh` (`make release`) on a

@@ -62,6 +62,10 @@ def main(argv):
                 client.delete(target)
             except ftplib.error_perm:
                 pass
+            except ftplib.error_reply as reply:
+                # Some console FTP servers answer DELE with another 2xx code (226) than 250.
+                if not str(reply).startswith('2'):
+                    raise
             client.rename(f'{target}.partial', target)
             print(f'copied {relative}', flush=True)
     with connect(host, port) as client:
