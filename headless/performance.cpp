@@ -312,6 +312,7 @@ extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::in
 #endif
 
 extern "C" std::size_t eden_heap_committed_total(void) __attribute__((weak));
+extern "C" std::uint64_t eden_lazy_committed_bytes(void) __attribute__((weak)); // src/memory_pages.cpp
 
 namespace {
 struct FreeMemory {
@@ -375,11 +376,12 @@ void ReportDirectMemory(const char* when) {
     if (total <= 0) return;
     const auto [free_bytes, largest_bytes, ranges] = ScanFreeMemory(total);
     std::printf("EDEN_MEMORY when=%s pool_mib=%lld free_mib=%llu largest_free_mib=%llu free_ranges=%u vulkan_mib=%llu "
-                "heap_mib=%llu\n",
+                "heap_mib=%llu lazy_mib=%llu\n",
                 when, static_cast<long long>(total >> 20), static_cast<unsigned long long>(free_bytes >> 20),
                 static_cast<unsigned long long>(largest_bytes >> 20), ranges,
                 vulkan_memory_used.load(std::memory_order_relaxed) >> 20,
-                eden_heap_committed_total ? static_cast<unsigned long long>(eden_heap_committed_total() >> 20) : 0ull);
+                eden_heap_committed_total ? static_cast<unsigned long long>(eden_heap_committed_total() >> 20) : 0ull,
+                eden_lazy_committed_bytes ? static_cast<unsigned long long>(eden_lazy_committed_bytes() >> 20) : 0ull);
     std::fflush(stdout);
 #else
     (void)when;

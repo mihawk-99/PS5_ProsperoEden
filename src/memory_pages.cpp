@@ -7,7 +7,9 @@
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <csignal>
 #include <mutex>
+#include <signal.h>
 #include <vector>
 #include <new>
 #include <sys/mman.h>
@@ -40,10 +42,9 @@ namespace {
 // guest memory access, and 16 KiB pages cover only a few MiB of TLB reach.
 struct Header { std::int64_t physical; std::size_t total; std::size_t lead; };
 constexpr std::size_t LargePage = 0x200000;
-// dev-settings sparse_tables=on (read with large_pages): the sparse page-table backing is off by
-// default. The console powered off (no crash record) at the end of a 3.5-minute 8K run with it
-// on; until that is explained it is a development switch only.
-bool sparse_tables_on = false;
+// dev-settings lazy_memory=off (read with large_pages): back the guest RAM and the page tables
+// densely, as before, instead of on first touch (LazyReserve below).
+bool lazy_memory_off = false;
 // Development A/B: dev-settings large_pages=off keeps every block 16 KiB-aligned. The heap takes
 // its blocks before the frontend parses the file, so read it here with plain system calls.
 bool LargePagesEnabled() {
@@ -60,7 +61,7 @@ bool LargePagesEnabled() {
             close(fd);
             text[count > 0 ? count : 0] = '\0';
             if (std::strstr(text, "large_pages=off")) value = 2;
-            if (std::strstr(text, "sparse_tables=on")) sparse_tables_on = true;
+            if (std::strstr(text, "lazy_memory=off")) lazy_memory_off = true;
         }
         state.store(value, std::memory_order_release);
     }
@@ -186,119 +187,262 @@ void FreeMemoryPages(void* pointer) noexcept {
     FreeMemoryPages(pointer, header.total - header.lead);
 }
 
-// Sparse backing for SparseLargeVector (the page tables): a large vector's range reads as
-// zeros from one shared 2 MiB block mapped read-only across it, and a 2 MiB chunk gets its own
-// zeroed direct memory the first time Eden commits a page in it (every write commits first).
-// Dense, a 64-bit game's page table alone held 1 GiB of the pool the GPU draws from.
+// Memory backed on first touch: the guest RAM (4 GiB) and the page tables (1 GiB for a 64-bit
+// game) held the pool the GPU draws from although games touch a fraction of them. A lazy range
+// is reserved address space; the first access to a chunk faults, and the fault handler gives the
+// chunk its own direct memory, zeroed before it is mapped (through a scratch address used once,
+// so the memory is never visible at two addresses and never replaces a live mapping), then the
+// access repeats. Code that writes commits first (CommitSparsePage, ClearBackingRegion).
+// An earlier design mapped one zero block read-only across a table and replaced parts of it with
+// MAP_FIXED; the console powered off during a run with it (docs/MEMORY_FINDINGS.md).
 #ifdef PS5_NATIVE
 namespace {
-constexpr std::size_t SparseChunk = 0x200000;
-constexpr std::size_t SparseThreshold = 64u << 20; // smaller vectors stay dense
-struct SparseRegion {
-    std::uintptr_t base = 0;
+struct LazyRange {
+    std::atomic<std::uintptr_t> base{0};
     std::size_t size = 0;
-    std::vector<std::int64_t> chunks; // direct memory of each committed chunk, -1 if none
+    std::size_t chunk = 0;
+    std::atomic<std::int64_t>* physical = nullptr; // per chunk; -1 until backed
 };
-std::mutex sparse_mutex;
-SparseRegion sparse_regions[16];
-std::int64_t sparse_zero = -1;
+LazyRange lazy_ranges[8];
+std::atomic_flag lazy_lock = ATOMIC_FLAG_INIT;
+std::atomic<std::uint64_t> lazy_committed{0};
+// Scratch addresses, each used once to zero a chunk and then released.
+std::uint8_t* lazy_scratch = nullptr;
+std::size_t lazy_scratch_left = 0;
+struct sigaction lazy_previous_segv{}, lazy_previous_bus{};
 
-SparseRegion* FindSparseRegion(std::uintptr_t address) {
-    for (auto& region : sparse_regions)
-        if (region.size && address >= region.base && address - region.base < region.size) return &region;
+struct LazyGuard {
+    LazyGuard() { while (lazy_lock.test_and_set(std::memory_order_acquire)) {} }
+    ~LazyGuard() { lazy_lock.clear(std::memory_order_release); }
+};
+
+LazyRange* FindLazy(std::uintptr_t address) {
+    for (auto& range : lazy_ranges) {
+        const auto base = range.base.load(std::memory_order_acquire);
+        if (base && address >= base && address - base < range.size) return &range;
+    }
     return nullptr;
 }
 
-// Zeroed direct memory, mapped nowhere yet (its zeroing view is released); -1 on failure.
-std::int64_t ZeroedChunk() {
-    std::int64_t physical = -1;
-    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), SparseChunk, SparseChunk, 12, &physical) != 0)
-        return -1;
-    void* view = reinterpret_cast<void*>(cpu_mapping_hint);
-    if (sceKernelMapDirectMemory(&view, SparseChunk, PROT_READ | PROT_WRITE, 0, physical, SparseChunk) != 0) {
-        (void)sceKernelReleaseDirectMemory(physical, SparseChunk);
-        return -1;
+// Under lazy_lock. Gives chunk `index` of `range` zeroed direct memory. false on failure.
+bool BackChunk(LazyRange& range, std::size_t index) {
+    if (range.physical[index].load(std::memory_order_acquire) >= 0) return true;
+    const std::size_t chunk = range.chunk;
+    if (lazy_scratch_left < chunk) {
+        constexpr std::size_t ScratchBytes = std::size_t{16} << 30; // address space only
+        void* scratch = reinterpret_cast<void*>(cpu_mapping_hint);
+        if (sceKernelReserveVirtualRange(&scratch, ScratchBytes, 0, LargePage) != 0 || !cpu_mapping_address(scratch))
+            return false;
+        lazy_scratch = static_cast<std::uint8_t*>(scratch);
+        lazy_scratch_left = ScratchBytes;
     }
-    std::memset(view, 0, SparseChunk);
-    munmap(view, SparseChunk);
-    return physical;
+    std::int64_t physical = -1;
+    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), chunk, chunk, 12, &physical) != 0) return false;
+    void* zeroing = lazy_scratch;
+    lazy_scratch += chunk;
+    lazy_scratch_left -= chunk;
+    if (sceKernelMapDirectMemory(&zeroing, chunk, PROT_READ | PROT_WRITE, MAP_FIXED, physical, chunk) != 0) {
+        (void)sceKernelReleaseDirectMemory(physical, chunk);
+        return false;
+    }
+    std::memset(zeroing, 0, chunk);
+    munmap(zeroing, chunk);
+    void* at = reinterpret_cast<void*>(range.base.load(std::memory_order_relaxed) + index * chunk);
+    if (sceKernelMapDirectMemory(&at, chunk, PROT_READ | PROT_WRITE, MAP_FIXED, physical, chunk) != 0) {
+        (void)sceKernelReleaseDirectMemory(physical, chunk);
+        return false;
+    }
+    range.physical[index].store(physical, std::memory_order_release);
+    lazy_committed.fetch_add(chunk, std::memory_order_relaxed);
+    return true;
 }
+
+bool CommitLazy(std::uintptr_t address) {
+    LazyRange* range = FindLazy(address);
+    if (!range) return false;
+    const std::size_t index = (address - range->base.load(std::memory_order_relaxed)) / range->chunk;
+    if (range->physical[index].load(std::memory_order_acquire) >= 0) return true;
+    LazyGuard guard;
+    return BackChunk(*range, index);
 }
+
+void ForwardFault(int signal, siginfo_t* info, void* context) {
+    const struct sigaction& previous = signal == SIGSEGV ? lazy_previous_segv : lazy_previous_bus;
+    if (previous.sa_flags & SA_SIGINFO) {
+        previous.sa_sigaction(signal, info, context);
+    } else if (previous.sa_handler == SIG_DFL) {
+        std::signal(signal, SIG_DFL); // the access repeats and terminates as before
+    } else if (previous.sa_handler != SIG_IGN) {
+        previous.sa_handler(signal);
+    }
+}
+
+void HandleFault(int signal, siginfo_t* info, void* context) {
+    const auto address = reinterpret_cast<std::uintptr_t>(info->si_addr);
+    if (FindLazy(address)) {
+        if (CommitLazy(address)) return; // the access repeats on the new memory
+        static const char failed[] = "EDEN_LAZY_MEMORY commit failed (direct memory exhausted)\n";
+        (void)!write(2, failed, sizeof(failed) - 1);
+        (void)sceKernelDebugOutText(0, failed);
+    }
+    ForwardFault(signal, info, context);
+}
+
+bool InstallFaultHandler() {
+    static const bool installed = [] {
+        struct sigaction action{};
+        action.sa_sigaction = HandleFault;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        return sigaction(SIGSEGV, &action, &lazy_previous_segv) == 0 &&
+               sigaction(SIGBUS, &action, &lazy_previous_bus) == 0;
+    }();
+    return installed;
+}
+} // namespace
 #endif
 
-void* AllocateSparsePages(std::size_t size) noexcept {
+void* LazyReserve(std::size_t size, std::size_t chunk) noexcept {
 #ifdef PS5_NATIVE
     (void)LargePagesEnabled(); // reads dev-settings.txt once
-    if (size >= SparseThreshold && sparse_tables_on) {
-        const std::size_t total = (size + SparseChunk - 1) / SparseChunk * SparseChunk;
-        std::lock_guard lock{sparse_mutex};
-        static const auto aliasing = sceKernelEnableDmemAliasing();
-        (void)aliasing;
-        if (sparse_zero < 0) sparse_zero = ZeroedChunk();
-        SparseRegion* slot = nullptr;
-        for (auto& region : sparse_regions)
-            if (!region.size) { slot = &region; break; }
-        void* base = reinterpret_cast<void*>(cpu_mapping_hint);
-        if (sparse_zero >= 0 && slot && sceKernelReserveVirtualRange(&base, total, 0, SparseChunk) == 0) {
-            bool mapped = cpu_mapping_address(base);
-            for (std::size_t offset = 0; mapped && offset < total; offset += SparseChunk) {
-                void* at = static_cast<std::uint8_t*>(base) + offset;
-                mapped = sceKernelMapDirectMemory(&at, SparseChunk, PROT_READ, MAP_FIXED, sparse_zero, SparseChunk) == 0;
-            }
-            if (mapped) {
-                char line[96];
-                const int length = std::snprintf(line, sizeof(line), "EDEN_SPARSE_VECTOR bytes=%zu va=%p\n", total, base);
-                if (length > 0) (void)!write(2, line, static_cast<std::size_t>(length));
-                (void)sceKernelDebugOutText(0, line);
-                slot->base = reinterpret_cast<std::uintptr_t>(base);
-                slot->size = total;
-                slot->chunks.assign(total / SparseChunk, -1);
-                return base;
-            }
-            munmap(base, total);
-        }
-        // No sparse backing: the qualified dense path.
+    if (lazy_memory_off || !InstallFaultHandler()) return nullptr;
+    const std::size_t total = (size + chunk - 1) / chunk * chunk;
+    void* base = reinterpret_cast<void*>(cpu_mapping_hint);
+    if (sceKernelReserveVirtualRange(&base, total, 0, chunk < LargePage ? LargePage : chunk) != 0) return nullptr;
+    if (!cpu_mapping_address(base)) {
+        munmap(base, total);
+        return nullptr;
     }
+    auto* physical = new (std::nothrow) std::atomic<std::int64_t>[total / chunk];
+    if (!physical) {
+        munmap(base, total);
+        return nullptr;
+    }
+    for (std::size_t i = 0; i < total / chunk; ++i) physical[i].store(-1, std::memory_order_relaxed);
+    LazyGuard guard;
+    for (auto& range : lazy_ranges) {
+        if (range.base.load(std::memory_order_relaxed)) continue;
+        range.size = total;
+        range.chunk = chunk;
+        range.physical = physical;
+        range.base.store(reinterpret_cast<std::uintptr_t>(base), std::memory_order_release);
+        char line[96];
+        const int length = std::snprintf(line, sizeof(line), "EDEN_LAZY_MEMORY reserve bytes=%zu chunk=%zu va=%p\n",
+                                         total, chunk, base);
+        if (length > 0) (void)sceKernelDebugOutText(0, line);
+        return base;
+    }
+    delete[] physical;
+    munmap(base, total);
+#else
+    (void)size;
+    (void)chunk;
 #endif
+    return nullptr;
+}
+
+bool LazyOwns(const void* pointer) noexcept {
+#ifdef PS5_NATIVE
+    return FindLazy(reinterpret_cast<std::uintptr_t>(pointer)) != nullptr;
+#else
+    (void)pointer;
+    return false;
+#endif
+}
+
+bool LazyBacked(const void* pointer) noexcept {
+#ifdef PS5_NATIVE
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    const LazyRange* range = FindLazy(address);
+    return !range || range->physical[(address - range->base.load(std::memory_order_relaxed)) / range->chunk]
+                             .load(std::memory_order_acquire) >= 0;
+#else
+    (void)pointer;
+    return true;
+#endif
+}
+
+bool LazyCommit(const void* pointer) noexcept {
+#ifdef PS5_NATIVE
+    return CommitLazy(reinterpret_cast<std::uintptr_t>(pointer));
+#else
+    (void)pointer;
+    return true;
+#endif
+}
+
+std::uint64_t LazyCommittedBytes() noexcept {
+#ifdef PS5_NATIVE
+    return lazy_committed.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
+}
+
+void LazyRelease(void* pointer) noexcept {
+#ifdef PS5_NATIVE
+    LazyGuard guard;
+    LazyRange* range = FindLazy(reinterpret_cast<std::uintptr_t>(pointer));
+    if (!range) return;
+    const auto base = range->base.load(std::memory_order_relaxed);
+    range->base.store(0, std::memory_order_release);
+    if (munmap(reinterpret_cast<void*>(base), range->size) != 0) std::abort();
+    for (std::size_t i = 0; i < range->size / range->chunk; ++i) {
+        const auto physical = range->physical[i].load(std::memory_order_relaxed);
+        if (physical < 0) continue;
+        if (sceKernelReleaseDirectMemory(physical, range->chunk) != 0) std::abort();
+        lazy_committed.fetch_sub(range->chunk, std::memory_order_relaxed);
+    }
+    delete[] range->physical;
+    range->physical = nullptr;
+    range->size = range->chunk = 0;
+#else
+    (void)pointer;
+#endif
+}
+
+// SparseLargeVector (the page tables): lazy in 64 KiB chunks when large, else dense.
+void* AllocateSparsePages(std::size_t size) noexcept {
+    if (size >= (64u << 20))
+        if (void* base = LazyReserve(size, 64u << 10)) return base;
     return AllocateMemoryPages(size);
 }
 
 void FreeSparsePages(void* pointer, std::size_t size) noexcept {
     if (!pointer) return;
-#ifdef PS5_NATIVE
-    {
-        std::lock_guard lock{sparse_mutex};
-        if (auto* region = FindSparseRegion(reinterpret_cast<std::uintptr_t>(pointer))) {
-            if (munmap(pointer, region->size) != 0) std::abort();
-            for (const auto physical : region->chunks)
-                if (physical >= 0 && sceKernelReleaseDirectMemory(physical, SparseChunk) != 0) std::abort();
-            *region = SparseRegion{};
-            return;
-        }
+    if (LazyOwns(pointer)) {
+        LazyRelease(pointer);
+        return;
     }
-#endif
     FreeMemoryPages(pointer, size);
 }
 
 void CommitSparsePage(void* page) noexcept {
-#ifdef PS5_NATIVE
-    const auto address = reinterpret_cast<std::uintptr_t>(page);
-    std::lock_guard lock{sparse_mutex};
-    auto* region = FindSparseRegion(address);
-    if (!region) return; // dense: already writable
-    const std::size_t index = (address - region->base) / SparseChunk;
-    if (region->chunks[index] >= 0) return;
-    const auto physical = ZeroedChunk();
-    void* at = reinterpret_cast<void*>(region->base + index * SparseChunk);
-    // Replaces the zero view in one step: a reader sees zeros before and after.
-    if (physical < 0 || sceKernelMapDirectMemory(&at, SparseChunk, PROT_READ | PROT_WRITE, MAP_FIXED, physical,
-                                                 SparseChunk) != 0) {
-        std::fprintf(stderr, "Sparse page table commit failed at %p\n", page);
-        std::abort();
+    if (LazyOwns(page)) {
+        if (!LazyCommit(page)) {
+            std::fprintf(stderr, "Page table commit failed at %p (direct memory exhausted)\n", page);
+            std::abort();
+        }
+        return;
     }
-    region->chunks[index] = physical;
-#else
+#ifndef PS5_NATIVE
     mprotect(page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE);
 #endif
 }
 } // namespace Common
+
+// For other fault handlers (headless/fastmem_handler.cpp): true when the address is lazy memory
+// and now backed, so the access can repeat.
+extern "C" bool eden_lazy_memory_fault(void* address) {
+#ifdef PS5_NATIVE
+    const auto value = reinterpret_cast<std::uintptr_t>(address);
+    return Common::FindLazy(value) && Common::CommitLazy(value);
+#else
+    (void)address;
+    return false;
+#endif
+}
+
+extern "C" std::uint64_t eden_lazy_committed_bytes(void) {
+    return Common::LazyCommittedBytes();
+}

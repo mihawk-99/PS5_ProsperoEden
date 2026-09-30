@@ -374,7 +374,6 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
             else index = std::clamp(index + (event.key == RADIO_INPUT_RIGHT ? 1 : -1), 0, count - 1);
             if (Eden::kRenderResolutions[index] == preferences_.resolution) return;
             preferences_.resolution = Eden::kRenderResolutions[index];
-            if (!Eden::ClearResolutionLimits()) Eden::Report("settings", "Could not clear per-game resolution limits");
             SaveSettings();
         } else if (dialog_ == 4 && option_ == 0 && adjust) {
             preferences_.volume = std::clamp(preferences_.volume +
