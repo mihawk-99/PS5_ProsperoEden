@@ -63,6 +63,7 @@ extern "C" std::int64_t sceKernelGetDirectMemorySize();
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
@@ -715,6 +716,9 @@ int main(int argc, char** argv) {
 #else
             HeadlessWindow window;
 #endif
+            // The booted game's own contents (its control data above all), as Eden's Qt game list
+            // and Android frontend register them; declared first so it outlives the system.
+            FileSys::ManualContentProvider game_contents;
             Core::System system;
             passed("core_constructed");
 #ifdef EDEN_PS5_OPENGL
@@ -747,6 +751,15 @@ int main(int argc, char** argv) {
                 // Like Eden's Qt/Android frontends, reset shutdown state for each load.
                 system.SetShuttingDown(false);
                 system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+                // Without this only updates and DLC are known (the external content provider
+                // serves no base game), so a game without a separate update has no control
+                // data: no title version, no save size, and Eden's GetPseudoDeviceId and other
+                // NACP readers dereference null (Super Mario Bros. Wonder 1.0.0).
+                game_contents.ClearAllEntries();
+                system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &game_contents);
+                if (const auto file = system.GetFilesystem()->OpenFile(guest, FileSys::OpenMode::Read);
+                    !file || !game_contents.AddEntriesFromContainer(file))
+                    LOG_WARNING(Frontend, "EDEN_GAME_CONTENTS not registered: {}", guest);
                 if (pad) {
                     // A game's "connect controllers" screen: one player per PS5 controller in use.
                     Service::AM::Frontend::FrontendAppletSet applets;
