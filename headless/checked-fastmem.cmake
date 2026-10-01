@@ -1,21 +1,31 @@
-# Checked A32 fastmem. HostMemory (src/host_memory.cpp) keeps one byte per 4 KiB guest
-# page directly below the fastmem window: bit 0 blocks direct reads, bit 1 direct writes,
-# each also set when the following page is blocked, so a direct access never crosses into
-# a blocked page. A32 loads/stores test that byte, access [r13 + vaddr] when clear and
-# otherwise run the checked page-table lookup out of line. Unaliased, GPU-tracked and
+# Checked fastmem. HostMemory (src/host_memory.cpp) keeps one byte per 4 KiB guest page of
+# the fastmem window directly below it: bit 0 blocks direct reads, bit 1 direct writes, each
+# also set when the following page is blocked, so a direct access never crosses into a
+# blocked page. Loads/stores (A32 and A64) test that byte, access [r13 + vaddr] when clear and
+# otherwise run the checked page-table lookup out of line; A64 addresses beyond the window
+# (pages >= map bytes) are blocked by a range test first. Unaliased, GPU-tracked and
 # read-only pages therefore never fault or recompile; the fault handler only covers races
-# with concurrent mapping changes. Exclusive accesses keep the page-table path. A64 is
-# unchanged. Operates on memory_emitter (emit_x64_memory.h) and memory_source (.cpp.inc).
+# with concurrent mapping changes. Exclusive accesses keep the page-table path. Operates on
+# memory_emitter (emit_x64_memory.h) and memory_source (.cpp.inc).
 
 set(checked_helpers [=[
-// Checked A32 fastmem: see headless/checked-fastmem.cmake.
-constexpr int checked_map_bytes = 1 << 20;
+// Checked fastmem: see headless/checked-fastmem.cmake. The access map's size (one byte per
+// window page) is fixed when the window is created (src/host_memory.cpp).
+extern "C" unsigned long long eden_fastmem_map_bytes();
 constexpr u8 checked_read_blocked = 1, checked_write_blocked = 2;
 
-inline void EmitCheckedFastmemTest(BlockOfCode& code, Xbyak::Reg64 vaddr, Xbyak::Reg64 index, u8 blocked_bit, Xbyak::Label& blocked) {
-    code.mov(index.cvt32(), vaddr.cvt32());
-    code.shr(index.cvt32(), int(page_table_const_bits));
-    code.test(code.byte[r13 + index - checked_map_bytes], blocked_bit);
+inline void EmitCheckedFastmemTest(BlockOfCode& code, Xbyak::Reg64 vaddr, Xbyak::Reg64 index, u8 blocked_bit, Xbyak::Label& blocked, bool wide) {
+    const auto map_bytes = static_cast<s32>(eden_fastmem_map_bytes());
+    if (wide) {
+        code.mov(index, vaddr);
+        code.shr(index, int(page_table_const_bits));
+        code.cmp(index, map_bytes);
+        code.jae(blocked, code.T_NEAR);
+    } else {
+        code.mov(index.cvt32(), vaddr.cvt32());
+        code.shr(index.cvt32(), int(page_table_const_bits));
+    }
+    code.test(code.byte[r13 + index - map_bytes], blocked_bit);
     code.jnz(blocked, code.T_NEAR);
 }
 
@@ -24,6 +34,14 @@ inline void EmitCheckedFastmemTest(BlockOfCode& code, Xbyak::Reg64 vaddr, Xbyak:
 template<typename EmitContext>
 Xbyak::RegExp EmitCheckedFallbackLookup(BlockOfCode& code, EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr, Xbyak::Reg64 page) {
     ASSERT(ctx.conf.absolute_offset_page_table);
+    if constexpr (std::is_same_v<EmitContext, A64EmitContext>) {
+        // Addresses beyond the guest address space fault, like the unchecked lookup.
+        if (ctx.conf.page_table_address_space_bits < 64) {
+            code.mov(page, vaddr);
+            code.shr(page, int(ctx.conf.page_table_address_space_bits));
+            code.jnz(abort, code.T_NEAR);
+        }
+    }
     if (bitsize != 8 && (ctx.conf.detect_misaligned_access_via_page_table & bitsize) != 0) {
         const u32 align_mask = u32(bitsize / 8 - 1);
         Xbyak::Label aligned;
@@ -111,7 +129,7 @@ foreach(direction Read Write)
         if constexpr (checked_fastmem) {
             const Xbyak::Reg64 index = ctx.reg_alloc.ScratchGpr(code);
             SharedLabel blocked = ctx.GenSharedLabel();
-            EmitCheckedFastmemTest(code, vaddr, index, ${blocked_bit}, *blocked);
+            EmitCheckedFastmemTest(code, vaddr, index, ${blocked_bit}, *blocked, !std::is_same_v<AxxEmitContext, A32EmitContext>);
             const auto location = ${direct_access};
             ctx.deferred_emits.emplace_back([=, this, &ctx] {
                 code.L(*blocked);
@@ -149,7 +167,7 @@ set(vec_read [=[
             const auto vector = ctx.reg_alloc.ScratchXmm(code);
             const auto wrapped_fn = read_fallbacks[std::make_tuple(false, bitsize, vaddr.getIdx(), temporary.getIdx())];
             SharedLabel blocked = ctx.GenSharedLabel(), abort = ctx.GenSharedLabel(), end = ctx.GenSharedLabel();
-            EmitCheckedFastmemTest(code, vaddr, temporary, checked_read_blocked, *blocked);
+            EmitCheckedFastmemTest(code, vaddr, temporary, checked_read_blocked, *blocked, !std::is_same_v<AxxEmitContext, A32EmitContext>);
             const auto location = code.getCurr();
             if constexpr (bitsize == 32) code.movd(vector, code.dword[r13 + vaddr]);
             else code.movq(vector, code.qword[r13 + vaddr]);
@@ -189,7 +207,7 @@ set(vec_write [=[
             const auto vector = ctx.reg_alloc.UseXmm(code, args[2]);
             const auto wrapped_fn = write_fallbacks[std::make_tuple(false, bitsize, vaddr.getIdx(), temporary.getIdx())];
             SharedLabel blocked = ctx.GenSharedLabel(), abort = ctx.GenSharedLabel(), end = ctx.GenSharedLabel();
-            EmitCheckedFastmemTest(code, vaddr, temporary, checked_write_blocked, *blocked);
+            EmitCheckedFastmemTest(code, vaddr, temporary, checked_write_blocked, *blocked, !std::is_same_v<AxxEmitContext, A32EmitContext>);
             const auto location = code.getCurr();
             if constexpr (bitsize == 32) code.movd(code.dword[r13 + vaddr], vector);
             else code.movq(code.qword[r13 + vaddr], vector);
@@ -256,12 +274,12 @@ string(REPLACE "${exclusive_marker}"
     checked_exclusive "${checked_exclusive}")
 set(memory_source "${checked_prefix}${checked_exclusive}")
 
-# The .inc is compiled once for A32 and once for A64.
+# The .inc is compiled once for A32 and once for A64; both use the checked path.
 set(checked_select "namespace {\nusing Vector = std::array<u64, 2>;\n}\n")
 string(FIND "${memory_source}" "${checked_select}" checked_select_at)
 if(checked_select_at LESS 0)
     message(FATAL_ERROR "Pinned memory emitter prologue changed")
 endif()
 string(REPLACE "${checked_select}"
-    "${checked_select}\nconstexpr bool checked_fastmem = std::is_same_v<AxxEmitContext, A32EmitContext>;\n"
+    "${checked_select}\nconstexpr bool checked_fastmem = true;\n"
     memory_source "${memory_source}")
