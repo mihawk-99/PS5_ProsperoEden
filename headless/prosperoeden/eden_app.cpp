@@ -70,6 +70,26 @@ uint32_t ChosenUpdate(const GameInfo& game) {
     return Eden::ResolveUpdate(Eden::LoadGameUpdate(game.title_id), versions);
 }
 
+// Steps a game's version through newest update, older updates, the game itself (and around),
+// forwards or backwards, and saves it; the newest update is saved as the default. false when
+// the game has no update to choose or the choice could not be saved.
+bool ChooseUpdate(const GameInfo& game, uint32_t version) {
+    if (!game.title_id || game.content.updates.empty()) return false;
+    const bool newest = version != 0 && version == game.content.updates.front().first;
+    return Eden::SaveGameUpdate(game.title_id, version == 0 ? "base" : newest ? "" : std::to_string(version));
+}
+
+bool StepUpdate(const GameInfo& game, bool forward) {
+    if (!game.title_id || game.content.updates.empty()) return false;
+    std::vector<uint32_t> order;
+    for (const auto& update : game.content.updates) order.push_back(update.first);
+    order.push_back(0);
+    const auto at = std::find(order.begin(), order.end(), ChosenUpdate(game));
+    std::size_t index = at == order.end() ? 0 : static_cast<std::size_t>(at - order.begin());
+    index = forward ? (index + 1) % order.size() : (index + order.size() - 1) % order.size();
+    return ChooseUpdate(game, order[index]);
+}
+
 std::string VersionText(const GameInfo& game) {
     const uint32_t chosen = ChosenUpdate(game);
     std::string text = game.content.base_version.empty() ? "Game" : game.content.base_version;
@@ -434,16 +454,9 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
         else if (dialog_ == 1 && setup_ready_ && count > 0 && event.key == RADIO_INPUT_TRIANGLE)
             OpenPatches(dialog_selected_);
         else if (dialog_ == 1 && count > 0 && event.key == RADIO_INPUT_SQUARE) {
-            // Newest update, older ones, then the game without an update; the newest is the default.
             const GameInfo& game = games[dialog_selected_];
             if (!game.title_id || game.content.updates.empty()) return;
-            std::vector<uint32_t> order;
-            for (const auto& update : game.content.updates) order.push_back(update.first);
-            order.push_back(0);
-            const auto current = std::find(order.begin(), order.end(), ChosenUpdate(game));
-            const uint32_t next = current == order.end() || current + 1 == order.end() ? order.front() : *(current + 1);
-            const std::string choice = next == 0 ? "base" : next == order.front() ? "" : std::to_string(next);
-            const bool saved = Eden::SaveGameUpdate(game.title_id, choice);
+            const bool saved = StepUpdate(game, true);
             UpdateDialog();
             SetText(document_, "game-mode-hint-text", saved ? "Version saved for this game. Applies on next launch." :
                     "Could not save the version. Please try again.");
@@ -776,49 +789,162 @@ void EdenApp::UpdateFiles() {
 }
 
 void EdenApp::OpenPatches(int game) {
-    const GameInfo& info = games.at(game);
-    patches_title_ = info.title_id;
-    patches_game_ = info.name;
-    patches_build_.clear();
-    patches_.clear();
-    patches_chosen_.clear();
+    patches_game_index_ = game;
     patches_selected_ = 0;
     patches_message_.clear();
-    // Patches are made for one build: the version this game runs (its chosen update, or itself).
-    if (patches_title_)
-        patches_build_ = Eden::ReadBuildId(Eden::AssetsPath("roms/" + info.path).c_str(), ChosenUpdate(info));
-    if (!patches_build_.empty()) patches_ = Eden::Patches::ForGame(patches_title_, patches_build_);
-    for (const auto& id : Eden::LoadGamePatches(patches_title_)) patches_chosen_.insert(id);
-    char title[17];
-    std::snprintf(title, sizeof(title), "%016llX", static_cast<unsigned long long>(patches_title_));
-    Eden::Report("patches", (std::string{"title "} + title + " build " +
-                             (patches_build_.empty() ? std::string{"unreadable"} : patches_build_.substr(0, 16)) +
-                             ": " + std::to_string(patches_.size()) + " entries in " + Eden::PatchesDir()).c_str());
+    patches_open_.clear();
+    LoadPatches();
     SetClass(document_, "patches-dialog", "open", true);
     dialog_ = 9;
     UpdatePatches();
 }
 
+// Every build's entries, grouped by version: the game's installed versions first (newest
+// first, with the one it runs marked), then builds the patch folder has but no installed version
+// matches. Chosen entries of every build stay saved; only those of the version run apply.
+void EdenApp::LoadPatches() {
+    const GameInfo& info = games.at(patches_game_index_);
+    patches_title_ = info.title_id;
+    patches_game_ = info.name;
+    patches_build_.clear();
+    patches_.clear();
+    patch_versions_.clear();
+    patch_rows_.clear();
+    patches_chosen_.clear();
+    if (!patches_title_) return;
+    const std::string rom = Eden::AssetsPath("roms/" + info.path);
+    const uint32_t chosen = ChosenUpdate(info);
+    std::vector<PatchRow> versions;
+    for (const auto& [version, label] : info.content.updates)
+        versions.push_back({-1, {}, label + " update", true, version});
+    versions.push_back({-1, {}, (info.content.base_version.empty() ? std::string{"Game"} : info.content.base_version) +
+                                    (info.content.updates.empty() ? "" : " game"), true, 0});
+    for (auto& version : versions) {
+        version.build = Eden::Patches::Lower(Eden::ReadBuildId(rom.c_str(), version.version).substr(0, 16));
+        if (version.version == chosen) patches_build_ = version.build;
+    }
+    // Entries in this game's title ID folders for any build, and loose files for installed builds.
+    std::set<std::string> seen;
+    const auto add = [&](std::vector<Eden::Patches::Entry> found) {
+        for (auto& entry : found)
+            if (entry.build.size() == 16 && seen.insert(entry.id).second) patches_.push_back(std::move(entry));
+    };
+    add(Eden::Patches::ForGame(patches_title_, ""));
+    for (const auto& version : versions)
+        if (version.build.size() == 16) add(Eden::Patches::ForGame(patches_title_, version.build));
+    std::set<std::string> other_builds;
+    for (const auto& entry : patches_) other_builds.insert(entry.build);
+    for (const auto& version : versions) other_builds.erase(version.build);
+    for (const auto& build : other_builds) {
+        std::string upper = build;
+        for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        versions.push_back({-1, build, "Build " + upper, false, 0});
+    }
+    patch_versions_ = versions;
+    // The version in use starts open; the others stay closed until opened.
+    if (!patches_build_.empty()) patches_open_.insert(patches_build_);
+    ShowPatchRows();
+    for (const auto& id : Eden::LoadGamePatches(patches_title_)) patches_chosen_.insert(id);
+    char title[17];
+    std::snprintf(title, sizeof(title), "%016llX", static_cast<unsigned long long>(patches_title_));
+    Eden::Report("patches", (std::string{"title "} + title + " build " +
+                             (patches_build_.empty() ? std::string{"unreadable"} : patches_build_) + ": " +
+                             std::to_string(patches_.size()) + " entries for " +
+                             std::to_string(versions.size()) + " versions in " + Eden::PatchesDir()).c_str());
+}
+
+void EdenApp::ShowPatchRows() {
+    patch_rows_.clear();
+    for (const auto& version : patch_versions_) {
+        patch_rows_.push_back(version);
+        if (version.build.size() != 16 || !patches_open_.contains(version.build)) continue;
+        for (int index = 0; index < static_cast<int>(patches_.size()); ++index)
+            if (patches_[index].build == version.build) {
+                PatchRow row = version;
+                row.entry = index;
+                patch_rows_.push_back(std::move(row));
+            }
+    }
+}
+
 void EdenApp::HandlePatchesInput(const radio_input_event_t& event) {
-    const int count = static_cast<int>(patches_.size());
+    const int count = static_cast<int>(patch_rows_.size());
+    const GameInfo& game = games.at(patches_game_index_);
+    // After a version change the cursor stays on the same row, which LoadPatches rebuilds alike.
+    const auto use_version = [&](uint32_t version) {
+        if (!ChooseUpdate(game, version)) {
+            patches_message_ = "Could not save the version. Please try again.";
+            return;
+        }
+        LoadPatches();
+        patches_selected_ = std::min(patches_selected_, static_cast<int>(patch_rows_.size()) - 1);
+        patches_message_ = "Version saved for this game. Its patches apply on the next launch.";
+    };
     if (event.key == RADIO_INPUT_CIRCLE) {
         SetClass(document_, "patches-dialog", "open", false);
         dialog_ = 1;
         UpdateDialog();
         return;
     }
+    patches_message_.clear();
     if (event.key == RADIO_INPUT_UP && count) {
         patches_selected_ = (patches_selected_ + count - 1) % count;
     } else if (event.key == RADIO_INPUT_DOWN && count) {
         patches_selected_ = (patches_selected_ + 1) % count;
     } else if ((event.key == RADIO_INPUT_L1 || event.key == RADIO_INPUT_R1) && count) {
         patches_selected_ = std::clamp(patches_selected_ + (event.key == RADIO_INPUT_R1 ? 6 : -6), 0, count - 1);
+    } else if (event.key == RADIO_INPUT_LEFT || event.key == RADIO_INPUT_RIGHT) {
+        if (game.content.updates.empty()) {
+            patches_message_ = "This game has no update to switch to. Put update files in the updates folder.";
+        } else if (StepUpdate(game, event.key != RADIO_INPUT_LEFT)) {
+            LoadPatches();
+            patches_selected_ = std::min(patches_selected_, static_cast<int>(patch_rows_.size()) - 1);
+            patches_message_ = "Version saved for this game. Its patches apply on the next launch.";
+        } else {
+            patches_message_ = "Could not save the version. Please try again.";
+        }
+    } else if (event.key == RADIO_INPUT_SQUARE && count) {
+        // The focused version (or the version of the focused patch) becomes the one the game runs.
+        const PatchRow& row = patch_rows_[patches_selected_];
+        if (!row.build.empty() && row.build == patches_build_) {
+            patches_message_ = "The game already runs this version.";
+        } else if (!row.installed) {
+            patches_message_ = "No installed version of the game has this build. Put the matching update in "
+                               "the updates folder to use these patches.";
+        } else if (game.content.updates.empty()) {
+            patches_message_ = "This game has no update to switch to.";
+        } else {
+            const std::string build = row.build;
+            use_version(row.version);
+            // Keep the cursor on that version's header.
+            for (int index = 0; index < static_cast<int>(patch_rows_.size()); ++index)
+                if (patch_rows_[index].entry < 0 && patch_rows_[index].build == build) patches_selected_ = index;
+        }
     } else if (event.key == RADIO_INPUT_CROSS && count) {
-        // Choices for other builds of the game stay saved; this page changes this build's.
-        Eden::Patches::Toggle(patches_, patches_chosen_, static_cast<std::size_t>(patches_selected_));
-        const bool saved = Eden::SaveGamePatches(patches_title_, {patches_chosen_.begin(), patches_chosen_.end()});
-        if (!saved) Eden::Report("settings", "Could not save the game's patches");
-        patches_message_ = saved ? "Saved. Applies the next time the game starts." : "Could not save. Please try again.";
+        const PatchRow& row = patch_rows_[patches_selected_];
+        const bool current = !row.build.empty() && row.build == patches_build_;
+        if (row.entry < 0) {
+            // A version's header opens or closes its list.
+            if (row.build.size() != 16) {
+                patches_message_ = "This version's build could not be read.";
+            } else if (!patches_open_.erase(row.build)) {
+                patches_open_.insert(row.build);
+            }
+            const std::string build = row.build;
+            ShowPatchRows();
+            for (int index = 0; index < static_cast<int>(patch_rows_.size()); ++index)
+                if (patch_rows_[index].entry < 0 && patch_rows_[index].build == build) patches_selected_ = index;
+        } else if (!current) {
+            patches_message_ = row.installed ?
+                "This patch is for " + row.label + ", which the game does not run now. Press SQUARE to use that version." :
+                "This patch is for a version that is not installed. Put its update in the updates folder to use it.";
+        } else {
+            // Choices for other builds of the game stay saved; only the version in use applies.
+            Eden::Patches::Toggle(patches_, patches_chosen_, static_cast<std::size_t>(row.entry));
+            const bool saved = Eden::SaveGamePatches(patches_title_, {patches_chosen_.begin(), patches_chosen_.end()});
+            if (!saved) Eden::Report("settings", "Could not save the game's patches");
+            patches_message_ = saved ? "Saved. Applies the next time the game starts." : "Could not save. Please try again.";
+        }
     } else {
         return;
     }
@@ -827,24 +953,43 @@ void EdenApp::HandlePatchesInput(const radio_input_event_t& event) {
 
 void EdenApp::UpdatePatches() {
     static constexpr int kRows = 6;
-    const int count = static_cast<int>(patches_.size());
+    const int count = static_cast<int>(patch_rows_.size());
     const int scroll = patches_selected_ < kRows ? 0 : patches_selected_ - (kRows - 1);
-    int chosen_here = 0;
-    for (const auto& entry : patches_) chosen_here += patches_chosen_.contains(entry.id);
+    int chosen_here = 0, here = 0;
+    for (const auto& entry : patches_)
+        if (entry.build == patches_build_) {
+            ++here;
+            chosen_here += patches_chosen_.contains(entry.id);
+        }
     for (int row = 0; row < kRows; ++row) {
         const int index = scroll + row;
         const std::string id = "patch-row-" + std::to_string(row);
         const std::string name = "patch-name-" + std::to_string(row);
         const std::string meta = "patch-meta-" + std::to_string(row);
         const bool present = index < count;
+        const PatchRow* item = present ? &patch_rows_[index] : nullptr;
+        const bool header = item && item->entry < 0;
+        const bool current = item && !item->build.empty() && item->build == patches_build_;
         SetClass(document_, id.c_str(), "focused", present && index == patches_selected_);
         SetClass(document_, id.c_str(), "offscreen", !present);
-        SetClass(document_, id.c_str(), "chosen", present && patches_chosen_.contains(patches_[index].id));
-        SetText(document_, name.c_str(), present ? patches_[index].name.c_str() : "");
-        SetText(document_, meta.c_str(), !present ? "" :
-                patches_[index].kind == Eden::Patches::Kind::Cheat ? "CHEAT" : "PCHTXT");
+        SetClass(document_, id.c_str(), "patch-header", header);
+        SetClass(document_, id.c_str(), "dimmed", present && !current);
+        SetClass(document_, id.c_str(), "chosen", item && !header && patches_chosen_.contains(patches_[item->entry].id));
+        std::string text, tag;
+        if (header) {
+            int found = 0;
+            for (const auto& entry : patches_) found += entry.build == item->build;
+            text = std::string(patches_open_.contains(item->build) ? "- " : "+ ") + item->label + "  (" +
+                   (found ? std::to_string(found) : std::string{"no"}) + (found == 1 ? " patch)" : " patches)");
+            tag = current ? "IN USE" : item->installed ? "USE" : "MISSING";
+        } else if (item) {
+            text = patches_[item->entry].name;
+            tag = patches_[item->entry].kind == Eden::Patches::Kind::Cheat ? "CHEAT" : "PCHTXT";
+        }
+        SetText(document_, name.c_str(), text.c_str());
+        SetText(document_, meta.c_str(), tag.c_str());
     }
-    SetClass(document_, "patches-empty", "visible", count == 0);
+    SetClass(document_, "patches-empty", "visible", patches_.empty());
     SetClass(document_, "patches-scrollbar", "offscreen", count <= kRows);
     if (count > kRows) if (Rml::Element* thumb = document_->GetElementById("patches-scrollbar-thumb")) {
         char top[24];
@@ -854,18 +999,30 @@ void EdenApp::UpdatePatches() {
     char position[24];
     std::snprintf(position, sizeof(position), "%d OF %d", count ? patches_selected_ + 1 : 0, count);
     SetText(document_, "patches-position", position);
-    SetText(document_, "patches-source", count ? ShortPath(patches_[patches_selected_].source, 60).c_str() : "");
+    const PatchRow* focused = count ? &patch_rows_[patches_selected_] : nullptr;
+    SetText(document_, "patches-source", !focused ? "" : focused->entry >= 0 ?
+            ShortPath(patches_[focused->entry].source, 60).c_str() :
+            ("Build " + (focused->build.empty() ? std::string{"unreadable"} : focused->build)).c_str());
     SetText(document_, "patches-game", patches_game_.c_str());
-    SetText(document_, "patches-build", patches_build_.empty() ? "Unreadable" : patches_build_.substr(0, 16).c_str());
-    SetText(document_, "patches-found", (std::to_string(count) + (count == 1 ? " patch" : " patches")).c_str());
+    SetText(document_, "patches-version", VersionText(games.at(patches_game_index_)).c_str());
+    SetText(document_, "patches-build", patches_build_.empty() ? "Unreadable" : patches_build_.c_str());
+    SetText(document_, "patches-found", (std::to_string(here) + " for this version, " +
+                                         std::to_string(patches_.size()) + " in all").c_str());
     SetText(document_, "patches-chosen", std::to_string(chosen_here).c_str());
     SetClass(document_, "patches-chosen", "ready", chosen_here > 0);
     SetText(document_, "patches-folder", ShortPath(Eden::PatchesDir(), 40).c_str());
     std::string message = patches_message_;
+    if (message.empty() && focused && !focused->build.empty() && focused->build != patches_build_)
+        message = focused->installed ? "Greyed out: for " + focused->label + ", which the game does not run now. "
+                                       "Press SQUARE to use that version." :
+                                       "Greyed out: for a version that is not installed. Put its update in the "
+                                       "updates folder to use these patches.";
     if (message.empty())
         message = patches_build_.empty() ? "This game's version could not be read, so no patch can be matched to it." :
-            count == 0 ? "Copy patch collections into the patch folder as downloaded (a cheat database's titles "
-                         "folder, .pchtxt mods), then open this page again." :
+            patches_.empty() ? "Copy patch collections into the patch folder as downloaded (a cheat database's titles "
+                               "folder, .pchtxt mods), then open this page again." :
+            focused && focused->entry < 0 ? "CROSS opens or closes this version's patches. Frame rate and resolution "
+                                            "choices replace each other." :
             "Frame rate and resolution choices replace each other. Patches apply when the game starts.";
     SetText(document_, "patches-message", message.c_str());
 }
