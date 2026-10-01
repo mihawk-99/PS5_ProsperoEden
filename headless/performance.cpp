@@ -444,8 +444,25 @@ namespace {
 }
 }
 
+#ifdef PS5_NATIVE
+// Read-only CPU state, with the prototypes of the payload SDK's hwinfo sample (and the CPU mode
+// getter's public PS4 prototype): clock, mode and temperatures beside each memory report, so a
+// run's log shows the console's thermal state (two runs ended with the console powering off).
+extern "C" long sceKernelGetCpuFrequency(void);
+extern "C" int sceKernelGetCpumode(void);
+extern "C" int sceKernelGetCpuTemperature(int*);
+extern "C" int sceKernelGetSocSensorTemperature(int, int*);
+#endif
+
 void ReportDirectMemory(const char* when) {
 #ifdef PS5_NATIVE
+    {
+        int cpu_temperature = -1, soc_temperature = -1;
+        if (sceKernelGetCpuTemperature(&cpu_temperature) != 0) cpu_temperature = -1;
+        if (sceKernelGetSocSensorTemperature(0, &soc_temperature) != 0) soc_temperature = -1;
+        std::printf("EDEN_CPU_STATE when=%s mhz=%ld cpumode=%d cpu_c=%d soc_c=%d\n", when,
+                    sceKernelGetCpuFrequency() / 1000000, sceKernelGetCpumode(), cpu_temperature, soc_temperature);
+    }
     const std::int64_t total = sceKernelGetDirectMemorySize();
     if (total <= 0) return;
     const auto [free_bytes, largest_bytes, ranges] = ScanFreeMemory(total);
