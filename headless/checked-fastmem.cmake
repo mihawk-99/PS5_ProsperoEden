@@ -274,6 +274,53 @@ string(REPLACE "${exclusive_marker}"
     checked_exclusive "${checked_exclusive}")
 set(memory_source "${checked_prefix}${checked_exclusive}")
 
+# Stack accesses (A64 addresses derived from SP or the frame pointer x29) keep the inline
+# page-table path: thread stacks are often scattered 4 KiB pages the window cannot alias, and
+# a checked access to a blocked page detours to out-of-line code, slower than the page table.
+set(stack_helper [=[
+// Instantiated only for A64 (the A32 build does not see A64::Reg).
+template<typename Value>
+bool EdenFramePointer(const Value& value) {
+    return static_cast<int>(value.GetA64RegRef()) == 29;
+}
+template<typename EmitContext>
+bool EdenStackAddress(IR::Inst* inst) {
+    if constexpr (!std::is_same_v<EmitContext, A64EmitContext>) {
+        return false;
+    } else {
+        IR::Value address = inst->GetArg(1);
+        for (int depth = 0; depth < 4 && !address.IsImmediate(); ++depth) {
+            IR::Inst* source = address.GetInst();
+            switch (source->GetOpcode()) {
+            case IR::Opcode::A64GetSP:
+                return true;
+            case IR::Opcode::A64GetX:
+                return EdenFramePointer(source->GetArg(0));
+            case IR::Opcode::Add64:
+            case IR::Opcode::Sub64:
+            case IR::Opcode::Identity:
+                address = source->GetArg(0);
+                continue;
+            default:
+                return false;
+            }
+        }
+        return false;
+    }
+}
+]=])
+set(stack_prefix_end "void AxxEmitX64::EmitExclusiveReadMemory(")
+string(FIND "${memory_source}" "${stack_prefix_end}" stack_prefix_at)
+if(stack_prefix_at LESS 0)
+    message(FATAL_ERROR "Pinned exclusive read emitter changed")
+endif()
+string(SUBSTRING "${memory_source}" 0 ${stack_prefix_at} stack_prefix)
+string(SUBSTRING "${memory_source}" ${stack_prefix_at} -1 stack_rest)
+string(REPLACE "    const auto fastmem_marker = ShouldFastmem(ctx, inst);\n"
+    "    const auto fastmem_marker = EdenStackAddress<AxxEmitContext>(inst) ? decltype(ShouldFastmem(ctx, inst)){} : ShouldFastmem(ctx, inst);\n"
+    stack_prefix "${stack_prefix}")
+set(memory_source "${stack_prefix}${stack_rest}")
+
 # The .inc is compiled once for A32 and once for A64; both use the checked path.
 set(checked_select "namespace {\nusing Vector = std::array<u64, 2>;\n}\n")
 string(FIND "${memory_source}" "${checked_select}" checked_select_at)
@@ -281,5 +328,5 @@ if(checked_select_at LESS 0)
     message(FATAL_ERROR "Pinned memory emitter prologue changed")
 endif()
 string(REPLACE "${checked_select}"
-    "${checked_select}\nconstexpr bool checked_fastmem = true;\n"
+    "${checked_select}\nconstexpr bool checked_fastmem = true;\n${stack_helper}"
     memory_source "${memory_source}")
