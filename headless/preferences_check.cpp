@@ -42,6 +42,14 @@ int main() {
         assert(Eden::RenderedLines(Eden::kRenderResolutions[i], false) == handheld[i]);
     }
     assert(std::string(Eden::ResolutionName(Eden::RenderResolution::P4320)) == "8K");
+    // Game versions: newest by default, a present saved version, the base, a missing version.
+    assert(Eden::ResolveUpdate("", {655360, 393216}) == 655360);
+    assert(Eden::ResolveUpdate("393216", {655360, 393216}) == 393216);
+    assert(Eden::ResolveUpdate("base", {655360}) == 0 && Eden::ResolveUpdate("", {}) == 0);
+    assert(Eden::ResolveUpdate("131072", {655360}) == 655360);
+    assert(Eden::SaveGameUpdate(0x0100F2C0115B6000ull, "base", file));
+    assert(Eden::LoadGameUpdate(0x0100F2C0115B6000ull, file) == "base");
+    assert(Eden::SaveGameUpdate(0x0100F2C0115B6000ull, "", file) && Eden::LoadGameUpdate(0x0100F2C0115B6000ull, file).empty());
     assert(Eden::LoadPreferences(file).resolution == Eden::RenderResolution::P2160);
 
     // Last and recent games.

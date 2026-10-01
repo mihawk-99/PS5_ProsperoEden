@@ -271,6 +271,31 @@ inline bool SaveGamePatches(uint64_t title_id, const std::vector<std::string>& i
     return Settings::Write(document, file);
 }
 
+// The version a game runs as, under games/<title>/update: "base" (the game itself), a version
+// number from its updates, or nothing (the newest update found).
+inline std::string LoadGameUpdate(uint64_t title_id, const std::string& file = SettingsFile()) {
+    if (!title_id) return {};
+    return Settings::String(Settings::Load(file),
+                            Settings::Json::json_pointer("/games/" + Settings::TitleKey(title_id) + "/update"));
+}
+inline bool SaveGameUpdate(uint64_t title_id, const std::string& choice, const std::string& file = SettingsFile()) {
+    if (!title_id) return false;
+    Settings::Json document = Settings::Load(file);
+    document["version"] = 1;
+    auto& game = document["games"][Settings::TitleKey(title_id)];
+    if (choice.empty()) game.erase("update");
+    else game["update"] = choice;
+    return Settings::Write(document, file);
+}
+// The update that runs (0: the game itself) from the saved choice and the versions present,
+// newest first: the saved version while it is present, else the newest.
+inline uint32_t ResolveUpdate(const std::string& choice, const std::vector<uint32_t>& newest_first) {
+    if (choice == "base") return 0;
+    for (const auto version : newest_first)
+        if (choice == std::to_string(version)) return version;
+    return newest_first.empty() ? 0 : newest_first.front();
+}
+
 // The resolution the running game renders at (the Settings choice when it started).
 inline RenderResolution& SessionResolution() {
     static RenderResolution value = RenderResolution::P1080;

@@ -622,14 +622,31 @@ int main(int argc, char** argv) {
 #if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)
             // The game's chosen patches (headless/patch_library.h) become one mod folder Eden applies.
             if (const auto title_id = guest ? eden_game_title_id(guest) : 0) {
-                char build_id[65]{};
-                const bool known = eden_game_build_id(guest, build_id, sizeof(build_id)) != 0;
+                // Updates and DLC in the updates and roms folders (also an update packed into the
+                // game's own file) apply as Eden finds them; the chosen version is the one that
+                // runs, the others are disabled (Eden's "Update@<version>", "Update" for none).
+                Settings::values.external_content_dirs = {Eden::AssetsPath("updates"), Eden::AssetsPath("roms")};
+                const auto content = Eden::ReadGameContent(guest, title_id);
+                std::vector<uint32_t> versions;
+                for (const auto& update : content.updates) versions.push_back(update.first);
+                const uint32_t update = Eden::ResolveUpdate(Eden::LoadGameUpdate(title_id), versions);
+                auto& disabled = Settings::values.disabled_addons[title_id];
+                std::erase_if(disabled, [](const std::string& name) { return name.starts_with("Update"); });
+                if (update == 0) disabled.push_back("Update");
+                for (const auto version : versions)
+                    if (version != update) disabled.push_back("Update@" + std::to_string(version));
+                std::string name = content.base_version.empty() ? std::string{"game"} : content.base_version;
+                for (const auto& [version, label] : content.updates)
+                    if (version == update) name = label + " (update " + std::to_string(version) + ")";
+                Eden::Report("launch", ("Version: " + name + ", " + std::to_string(content.dlc) + " DLC").c_str());
+
+                const std::string build_id = Eden::ReadBuildId(guest, update);
                 const auto chosen = Eden::LoadGamePatches(title_id);
-                const int applied = Eden::Patches::Apply(title_id, known ? build_id : "", chosen);
+                const int applied = Eden::Patches::Apply(title_id, build_id, chosen);
                 if (!chosen.empty() || applied != 0) {
                     const std::string detail = "Patches: " + std::to_string(applied) + " of " +
                         std::to_string(chosen.size()) + " chosen apply to build " +
-                        (known ? std::string(build_id, 16) : std::string{"unknown"});
+                        (build_id.empty() ? std::string{"unknown"} : build_id.substr(0, 16));
                     Eden::Report("launch", detail.c_str());
                 }
             }
