@@ -21,6 +21,7 @@
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_metadata.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -134,40 +135,129 @@ uint64_t eden_game_title_id(const char* rom_path) {
     return 0;
 }
 
-int eden_game_build_id(const char* rom_path, char* hex, size_t hex_capacity) {
-    if (!rom_path || !hex || hex_capacity < 65) return 0;
-    hex[0] = '\0';
+namespace {
+// The game's package: an NSP, or an XCI's secure partition.
+std::shared_ptr<FileSys::NSP> OpenPackage(FileSys::RealVfsFilesystem& vfs, const char* rom_path) {
+    const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);
+    if (!file) return {};
+    std::string path = rom_path;
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::shared_ptr<FileSys::NSP> package;
+    if (path.ends_with(".xci")) {
+        FileSys::XCI image(file);
+        if (image.GetStatus() != Loader::ResultStatus::Success) return {};
+        package = image.GetSecurePartitionNSP();
+    } else if (path.ends_with(".nsp")) {
+        package = std::make_shared<FileSys::NSP>(file);
+    }
+    return package && package->GetStatus() == Loader::ResultStatus::Success ? package : nullptr;
+}
+
+std::shared_ptr<FileSys::NCA> BaseNca(const std::shared_ptr<FileSys::NSP>& package, FileSys::NCAContentType type) {
+    const u64 base = FileSys::GetBaseTitleID(package->GetProgramTitleID());
+    for (const auto& nca : package->GetNCAsCollapsed())
+        if (nca && nca->GetStatus() == Loader::ResultStatus::Success && nca->GetType() == type &&
+            nca->GetTitleId() == base)
+            return nca;
+    return {};
+}
+
+std::string BuildIdOf(const FileSys::VirtualDir& exefs) {
+    const auto main = exefs ? exefs->GetFile("main") : FileSys::VirtualFile{};
+    // NSO header: "NSO0" magic, the 0x20-byte module ID at 0x40.
+    if (!main || main->GetSize() < 0x60) return {};
+    const auto header = main->ReadBytes(0x60);
+    if (header.size() != 0x60 || std::memcmp(header.data(), "NSO0", 4) != 0) return {};
+    char hex[65]{};
+    for (std::size_t i = 0; i < 0x20; ++i) std::snprintf(hex + i * 2, 3, "%02X", header[0x40 + i]);
+    return hex;
+}
+
+// Eden's external content provider over the updates and roms folders, as at launch.
+FileSys::RealVfsFilesystem& ContentVfs() {
+    static FileSys::RealVfsFilesystem vfs;
+    return vfs;
+}
+std::unique_ptr<FileSys::ExternalContentProvider>& ContentProvider() {
+    static std::unique_ptr<FileSys::ExternalContentProvider> provider;
+    return provider;
+}
+FileSys::ExternalContentProvider& Content() {
+    auto& provider = ContentProvider();
+    if (!provider) {
+        Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, Eden::AssetsPath("keys"));
+        std::vector<FileSys::VirtualDir> dirs;
+        for (const char* folder : {"updates", "roms"})
+            if (auto dir = ContentVfs().OpenDirectory(Eden::AssetsPath(folder), FileSys::OpenMode::Read)) dirs.push_back(dir);
+        provider = std::make_unique<FileSys::ExternalContentProvider>(std::move(dirs));
+    }
+    return *provider;
+}
+} // namespace
+
+namespace Eden {
+void RescanGameContent() {
+    ContentProvider().reset();
+}
+
+GameContent ReadGameContent(const char* rom_path, uint64_t title_id) {
+    GameContent content;
+    if (!rom_path || !title_id) return content;
+    try {
+        auto& provider = Content();
+        const u64 base = FileSys::GetBaseTitleID(title_id);
+        for (const auto& entry : provider.ListUpdateVersions(FileSys::GetUpdateTitleID(base)))
+            content.updates.emplace_back(entry.version, entry.version_string.empty() ?
+                "v" + std::to_string(entry.version) : entry.version_string);
+        std::vector<u64> dlc;
+        for (const auto& entry : provider.ListEntriesFilter(FileSys::TitleType::AOC, std::nullopt, std::nullopt))
+            if ((entry.title_id & ~u64{0xFFF}) == FileSys::GetAOCBaseTitleID(base) &&
+                std::find(dlc.begin(), dlc.end(), entry.title_id) == dlc.end())
+                dlc.push_back(entry.title_id);
+        content.dlc = static_cast<unsigned>(dlc.size());
+        if (const auto package = OpenPackage(ContentVfs(), rom_path))
+            if (const auto control = BaseNca(package, FileSys::NCAContentType::Control); control && control->GetRomFS())
+                if (const auto romfs = FileSys::ExtractRomFS(control->GetRomFS())) {
+                    auto nacp = romfs->GetFile("control.nacp");
+                    if (!nacp) nacp = romfs->GetFile("Control.nacp");
+                    std::array<char, 0x11> version{};
+                    if (nacp && nacp->GetSize() >= 0x3070 &&
+                        nacp->Read(reinterpret_cast<unsigned char*>(version.data()), 0x10, 0x3060) == 0x10)
+                        content.base_version = version.data();
+                }
+    } catch (...) {
+    }
+    return content;
+}
+
+std::string ReadBuildId(const char* rom_path, uint32_t update_version) {
+    if (!rom_path) return {};
     try {
         Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, Eden::AssetsPath("keys"));
-        FileSys::RealVfsFilesystem vfs;
-        const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);
-        if (!file) return 0;
-        std::string path = rom_path;
-        std::transform(path.begin(), path.end(), path.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        std::shared_ptr<FileSys::NCA> program;
-        if (path.ends_with(".xci")) {
-            FileSys::XCI image(file);
-            if (image.GetStatus() != Loader::ResultStatus::Success) return 0;
-            program = image.GetNCAByType(FileSys::NCAContentType::Program);
-        } else if (path.ends_with(".nsp")) {
-            FileSys::NSP package(file);
-            if (package.GetStatus() != Loader::ResultStatus::Success) return 0;
-            program = package.GetNCA(package.GetProgramTitleID(), FileSys::ContentRecordType::Program);
-        }
-        if (!program || program->GetStatus() != Loader::ResultStatus::Success) return 0;
-        const auto exefs = program->GetExeFS();
-        const auto main = exefs ? exefs->GetFile("main") : FileSys::VirtualFile{};
-        // NSO header: "NSO0" magic, the 0x20-byte module ID at 0x40.
-        if (!main || main->GetSize() < 0x60) return 0;
-        const auto header = main->ReadBytes(0x60);
-        if (header.size() != 0x60 || std::memcmp(header.data(), "NSO0", 4) != 0) return 0;
-        for (std::size_t i = 0; i < 0x20; ++i)
-            std::snprintf(hex + i * 2, 3, "%02X", header[0x40 + i]);
-        return 1;
+        const auto package = OpenPackage(ContentVfs(), rom_path);
+        if (!package) return {};
+        const auto program = BaseNca(package, FileSys::NCAContentType::Program);
+        if (!program) return {};
+        if (update_version == 0) return BuildIdOf(program->GetExeFS());
+        // An update's program is stored against the game's own (its RomFS patches the base).
+        const auto raw = Content().GetEntryForVersion(
+            FileSys::GetUpdateTitleID(FileSys::GetBaseTitleID(package->GetProgramTitleID())),
+            FileSys::ContentRecordType::Program, update_version);
+        if (!raw) return {};
+        FileSys::NCA update(raw, program.get());
+        return BuildIdOf(update.GetExeFS());
     } catch (...) {
-        return 0;
+        return {};
     }
+}
+} // namespace Eden
+
+int eden_game_build_id(const char* rom_path, char* hex, size_t hex_capacity) {
+    if (!hex || hex_capacity < 65) return 0;
+    const auto build = Eden::ReadBuildId(rom_path, 0);
+    std::snprintf(hex, hex_capacity, "%s", build.c_str());
+    return build.empty() ? 0 : 1;
 }
 
 int eden_extract_game_metadata(const char* rom_path, const char* keys_dir,

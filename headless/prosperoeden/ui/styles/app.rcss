@@ -215,7 +215,7 @@ button { margin: 0; padding: 0; border: 0px transparent; border-radius: 0px; bac
 
 .lib-hint-select { left: 0px; width: 140px; } .lib-hint-back { left: 160px; width: 130px; }
 .lib-hint-browse { left: 310px; width: 250px; } .lib-hint-mode { left: 580px; width: 250px; }
-.lib-hint-patches { left: 850px; width: 200px; }
+.lib-hint-patches { left: 850px; width: 200px; } .lib-hint-version { left: 1070px; width: 200px; }
 #patches-dialog.open { display: block; }
 #patches-source { position: absolute; left: 30px; top: 58px; width: 760px; height: 30px; overflow: hidden; white-space: nowrap; color: #e2e8d7; font-size: 20px; line-height: 28px; }
 #patches-list-viewport { position: absolute; left: 30px; top: 104px; width: 760px; height: 518px; overflow: hidden; }

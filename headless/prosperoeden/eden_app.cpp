@@ -60,7 +60,25 @@ struct GameInfo {
     std::string path;
     std::string cover;
     uint64_t title_id = 0;
+    Eden::GameContent content; // updates and DLC found for it
 };
+
+// The update a game runs with (0: the game itself), from its saved choice.
+uint32_t ChosenUpdate(const GameInfo& game) {
+    std::vector<uint32_t> versions;
+    for (const auto& update : game.content.updates) versions.push_back(update.first);
+    return Eden::ResolveUpdate(Eden::LoadGameUpdate(game.title_id), versions);
+}
+
+std::string VersionText(const GameInfo& game) {
+    const uint32_t chosen = ChosenUpdate(game);
+    std::string text = game.content.base_version.empty() ? "Game" : game.content.base_version;
+    for (const auto& [version, label] : game.content.updates)
+        if (version == chosen) text = label + " (update)";
+    if (chosen == 0 && !game.content.updates.empty()) text += " (no update)";
+    if (game.content.dlc) text += ", " + std::to_string(game.content.dlc) + " DLC";
+    return text;
+}
 
 std::vector<GameInfo> games;
 
@@ -195,6 +213,7 @@ int CountInstalledGames() {
 
 void LoadGames() {
     games.clear();
+    Eden::RescanGameContent(); // updates and DLC copied in since the Library last opened
     (void)mkdir(Eden::ConfigDir().c_str(), 0777);
     (void)mkdir(Eden::CoversDir().c_str(), 0777);
     std::error_code directory_error;
@@ -219,9 +238,10 @@ void LoadGames() {
         const char* cover = cover_path.c_str();
         const int metadata = eden_extract_game_metadata(path.c_str(), Eden::AssetsPath("keys").c_str(), cover,
                                                         title, sizeof(title));
+        const uint64_t title_id = eden_game_title_id(path.c_str());
         games.push_back({metadata & EDEN_METADATA_TITLE ? title : file.substr(0, dot), format,
-                         size, file, metadata & EDEN_METADATA_COVER ? cover : "",
-                         eden_game_title_id(path.c_str())});
+                         size, file, metadata & EDEN_METADATA_COVER ? cover : "", title_id,
+                         Eden::ReadGameContent(path.c_str(), title_id)});
     }
     std::sort(games.begin(), games.end(), [](const GameInfo& a, const GameInfo& b) { return a.name < b.name; });
 }
@@ -413,6 +433,21 @@ void EdenApp::HandleInput(const radio_input_event_t& event) {
         }
         else if (dialog_ == 1 && setup_ready_ && count > 0 && event.key == RADIO_INPUT_TRIANGLE)
             OpenPatches(dialog_selected_);
+        else if (dialog_ == 1 && count > 0 && event.key == RADIO_INPUT_SQUARE) {
+            // Newest update, older ones, then the game without an update; the newest is the default.
+            const GameInfo& game = games[dialog_selected_];
+            if (!game.title_id || game.content.updates.empty()) return;
+            std::vector<uint32_t> order;
+            for (const auto& update : game.content.updates) order.push_back(update.first);
+            order.push_back(0);
+            const auto current = std::find(order.begin(), order.end(), ChosenUpdate(game));
+            const uint32_t next = current == order.end() || current + 1 == order.end() ? order.front() : *(current + 1);
+            const std::string choice = next == 0 ? "base" : next == order.front() ? "" : std::to_string(next);
+            const bool saved = Eden::SaveGameUpdate(game.title_id, choice);
+            UpdateDialog();
+            SetText(document_, "game-mode-hint-text", saved ? "Version saved for this game. Applies on next launch." :
+                    "Could not save the version. Please try again.");
+        }
         else if (dialog_ == 1 && setup_ready_ && count > 0 && event.key == RADIO_INPUT_CROSS)
             selected_game_ = Eden::AssetsPath("roms/" + games[dialog_selected_].path);
         else if (count > 0 && event.key == RADIO_INPUT_UP) {
@@ -527,6 +562,7 @@ void EdenApp::UpdateDialog() {
             SetText(document_, "game-detail-title", "No ROM selected");
             SetText(document_, "game-detail-format", "-");
             SetText(document_, "game-detail-size", "-");
+            SetText(document_, "game-detail-version", "-");
             SetText(document_, "game-detail-path", "-");
             if (Rml::Element* cover = document_->GetElementById("game-cover"))
                 cover->SetAttribute("src", "icons/prosperoeden.tga");
@@ -536,6 +572,7 @@ void EdenApp::UpdateDialog() {
             SetText(document_, "game-detail-title", game.name.c_str());
             SetText(document_, "game-detail-format", game.format.c_str());
             SetText(document_, "game-detail-size", game.size.c_str());
+            SetText(document_, "game-detail-version", VersionText(game).c_str());
             SetText(document_, "game-detail-path", game.path.c_str());
             if (Rml::Element* cover = document_->GetElementById("game-cover"))
                 cover->SetAttribute("src", game.cover.empty() ? "icons/prosperoeden.tga" : game.cover);
@@ -747,9 +784,9 @@ void EdenApp::OpenPatches(int game) {
     patches_chosen_.clear();
     patches_selected_ = 0;
     patches_message_.clear();
-    char build[65]{};
-    if (patches_title_ && eden_game_build_id(Eden::AssetsPath("roms/" + info.path).c_str(), build, sizeof(build)))
-        patches_build_ = build;
+    // Patches are made for one build: the version this game runs (its chosen update, or itself).
+    if (patches_title_)
+        patches_build_ = Eden::ReadBuildId(Eden::AssetsPath("roms/" + info.path).c_str(), ChosenUpdate(info));
     if (!patches_build_.empty()) patches_ = Eden::Patches::ForGame(patches_title_, patches_build_);
     for (const auto& id : Eden::LoadGamePatches(patches_title_)) patches_chosen_.insert(id);
     char title[17];
