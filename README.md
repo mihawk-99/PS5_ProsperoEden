@@ -1,3 +1,10 @@
+> [!WARNING]
+> **EXPERIMENTAL FORK OF [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden), focused on benchmarking my PS5 Vulkan driver.**
+> All contributions go upstream, and all credit goes to the original author,
+> [BlackBearReloaded](https://github.com/blackbearreloaded), and to the
+> [Eden](https://github.com/eden-emulator/mirror) project for the emulator.
+> Releases and support come from the [upstream repository](https://github.com/blackbearreloaded/ProsperoEden), not from this fork.
+
 <p align="center">
   <img src="sce_sys/icon0.png" width="128" alt="ProsperoEden icon">
 </p>
@@ -14,7 +21,7 @@ This is an early alpha. Video, audio, controller input, and saves have been conf
 
 ## About this fork
 
-This repository, [mihawk-99/PS5_ProsperoEden](https://github.com/mihawk-99/PS5_ProsperoEden), is my development fork of [blackbearreloaded/ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden). ProsperoEden is updated often upstream; this fork is where I prepare changes before they go back as pull requests, mainly the integration with the PS5 Vulkan driver ([PS5 Mesa](https://github.com/mihawk-99/PS5_Mesa), [PS5 Vulkan](https://github.com/mihawk-99/PS5_Vulkan)) and the [payload SDK fork](https://github.com/mihawk-99/PS5_PayloadSDK). Releases come from the upstream repository. Everything below this section is upstream's README, kept unchanged so merges stay clean.
+This repository, [mihawk-99/PS5_ProsperoEden](https://github.com/mihawk-99/PS5_ProsperoEden), is an experimental fork of [blackbearreloaded/ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden). I use it to benchmark the PS5 Vulkan driver ([PS5 Mesa](https://github.com/mihawk-99/PS5_Mesa), [PS5 Vulkan](https://github.com/mihawk-99/PS5_Vulkan)) and the [payload SDK fork](https://github.com/mihawk-99/PS5_PayloadSDK) with ProsperoEden's Vulkan renderer. Everything that works here is offered back to upstream as pull requests: this fork is not a separate project, and it makes no releases. ProsperoEden is BlackBearReloaded's work, and all credit for it belongs to them. Apart from the notice at the top and this section, the README is upstream's, kept unchanged so merges stay clean.
 
 - **`main`** is upstream's `main` plus the work that has not been merged upstream yet. It is the development line: work lands there.
 - **Upstream is merged in, never rebased onto.** `main` is published, so it is never rewritten or force-pushed.
