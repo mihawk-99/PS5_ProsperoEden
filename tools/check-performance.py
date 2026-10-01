@@ -27,7 +27,8 @@ for statement in (
 
 for bits in (32, 64):
     wrapper = (generated / f'arm_dynarmic_{bits}.cpp').read_text()
-    assert ('m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 16_MiB' if bits == 64 else
+    # Core 3 gets a game core's cache with spread cores (dev-settings spread_cores=on).
+    assert ('m_core_index == 0 ? 256_MiB : (m_core_index < 3 || eden_spread_cores) ? 192_MiB : 16_MiB' if bits == 64 else
             'm_core_index == 0 ? 512_MiB : m_core_index < 3 ? 64_MiB : 16_MiB') in wrapper
     assert 'config.code_cache_size = std::uint32_t(8_MiB);' in wrapper  # Null JIT stays small.
     if development:
