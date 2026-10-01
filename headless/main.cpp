@@ -927,6 +927,9 @@ int main(int argc, char** argv) {
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                         if (++command_poll >= 25) {
                             command_poll = 0;
+#ifdef EDEN_DEV_PROFILE
+                            Eden::Performance::PollTrace();
+#endif
                             std::error_code stop_error;
                             if (std::filesystem::remove(Eden::AppFile("stop-game.txt"), stop_error)) {
                                 Eden::Report("shutdown", "Stop requested by the test run");

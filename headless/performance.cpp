@@ -13,6 +13,7 @@
 #include <cpuid.h>
 #include <cstring>
 #include <map>
+#include <new>
 #include <mutex>
 #include <pthread.h>
 #include <sched.h>
@@ -23,6 +24,8 @@
 #include <vector>
 #include <latch>
 #include <time.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #ifdef EDEN_DEV_PROFILE
 #include <signal.h>
 #endif
@@ -90,8 +93,31 @@ struct JitBlock {
 constexpr std::size_t jit_block_capacity = std::size_t{1} << 20;
 JitBlock* core0_blocks = nullptr;
 std::atomic<std::size_t> core0_block_count{0};
+// Guest-code profile (profile-start.txt, needs pc-sample.txt): every guest core's blocks and
+// host PCs sampled at a fixed rate on cores 0-2 for a few seconds.
+constexpr std::size_t profile_block_capacity = std::size_t{1} << 19;
+constexpr std::size_t profile_sample_capacity = std::size_t{1} << 16;
+std::array<JitBlock*, 3> profile_blocks{};
+std::array<std::atomic<std::size_t>, 3> profile_block_count{};
+std::array<std::array<uintptr_t, profile_sample_capacity>, 3>* profile_samples = nullptr;
+std::array<std::atomic<std::size_t>, 3> profile_sample_count{};
+std::array<pthread_t, 3> profile_threads{};
+std::array<std::atomic<bool>, 3> profile_thread_ready{};
+std::atomic<bool> profile_active{false};
 
 void PcSignal(int, siginfo_t*, void* context) {
+    if (profile_active.load(std::memory_order_acquire) && profile_samples) {
+        for (unsigned core = 0; core < 3; ++core) {
+            if (!profile_thread_ready[core].load(std::memory_order_acquire) ||
+                !pthread_equal(pthread_self(), profile_threads[core])) continue;
+            const std::size_t index = profile_sample_count[core].load(std::memory_order_relaxed);
+            if (index < profile_sample_capacity) {
+                (*profile_samples)[core][index] = static_cast<const uintptr_t*>(context)[224 / sizeof(uintptr_t)];
+                profile_sample_count[core].store(index + 1, std::memory_order_release);
+            }
+            return;
+        }
+    }
     if (core_sample_ready.load(std::memory_order_acquire) &&
         pthread_equal(pthread_self(), core_sample_thread)) {
         const unsigned core_index = core_pc_count.load(std::memory_order_relaxed);
@@ -599,12 +625,16 @@ void RegisterWorker(const char* name) {
         Worker worker;
         worker.thread = pthread_self();
 #ifdef EDEN_DEV_PROFILE
-        if (pc_sampling && (i == 4 || i == pc_sample_core.load())) {
+        if (pc_sampling && (i <= 2 || i == 4 || i == pc_sample_core.load())) {
             sigset_t mask;
             sigemptyset(&mask);
             sigaddset(&mask, SIGUSR2);
             if (pthread_sigmask(SIG_UNBLOCK, &mask, nullptr))
                 throw std::runtime_error("Cannot enable development PC sampler");
+            if (i <= 2) {
+                profile_threads[i] = pthread_self();
+                profile_thread_ready[i].store(true, std::memory_order_release);
+            }
             if (i == pc_sample_core.load()) {
                 core_sample_thread = pthread_self();
                 core_sample_ready.store(true, std::memory_order_release);
@@ -787,7 +817,20 @@ extern "C" void eden_jit_block(unsigned, unsigned long long, const void*, unsign
 #ifdef EDEN_DEV_PROFILE
 extern "C" void eden_jit_block(unsigned core, unsigned long long location, const void* entry,
                                unsigned long long size) {
-    if (core != 0 || !pc_sampling) return;
+    if (!pc_sampling) return;
+    if (core < 3) {
+        if (!profile_blocks[core]) profile_blocks[core] = new (std::nothrow) JitBlock[profile_block_capacity];
+        if (profile_blocks[core]) {
+            std::size_t n = profile_block_count[core].load(std::memory_order_relaxed);
+            const auto at = reinterpret_cast<uintptr_t>(entry);
+            if (n && at < profile_blocks[core][n - 1].entry) n = 0; // the cache was cleared
+            if (n < profile_block_capacity) {
+                profile_blocks[core][n] = JitBlock{at, size, location};
+                profile_block_count[core].store(n + 1, std::memory_order_release);
+            }
+        }
+    }
+    if (core != 0) return;
     if (!core0_blocks) core0_blocks = new JitBlock[jit_block_capacity];
     std::size_t count = core0_block_count.load(std::memory_order_relaxed);
     const auto address = reinterpret_cast<uintptr_t>(entry);
@@ -795,6 +838,119 @@ extern "C" void eden_jit_block(unsigned core, unsigned long long location, const
     if (count >= jit_block_capacity) return;
     core0_blocks[count] = JitBlock{address, size, location};
     core0_block_count.store(count + 1, std::memory_order_release);
+}
+
+namespace {
+constexpr std::size_t trace_capacity = std::size_t{1} << 21; // 64 MiB
+constexpr long long trace_seconds = 3;
+TraceEvent* trace_events = nullptr;
+std::atomic<std::size_t> trace_count{0};
+long long trace_end_ns = 0;
+} // namespace
+
+void TraceRecord(TraceType type, unsigned core, unsigned long long thread, unsigned svc,
+                 unsigned long long a0, unsigned long long a1) {
+    const std::size_t index = trace_count.fetch_add(1, std::memory_order_relaxed);
+    if (index >= trace_capacity) return;
+    trace_events[index] = TraceEvent{NowNs(), static_cast<unsigned>(thread), static_cast<unsigned short>(core),
+                                     static_cast<unsigned char>(type), static_cast<unsigned char>(svc), a0, a1};
+}
+
+namespace {
+// Writes the profile: per core, the block table then the samples; then the guest instructions
+// (up to 64 words) of the 400 blocks with the most samples over all cores.
+void WriteProfile() {
+    const std::string path = "/data/prosperoeden/logs/profile.bin";
+    FILE* file = std::fopen(path.c_str(), "wb");
+    if (!file) return;
+    std::map<unsigned long long, unsigned> hot;
+    for (unsigned core = 0; core < 3; ++core) {
+        const std::size_t blocks = profile_blocks[core] ? std::min(profile_block_count[core].load(), profile_block_capacity) : 0;
+        const std::size_t samples = std::min(profile_sample_count[core].load(), profile_sample_capacity);
+        const unsigned long long counts[2] = {blocks, samples};
+        std::fwrite(counts, sizeof(counts), 1, file);
+        if (blocks) std::fwrite(profile_blocks[core], sizeof(JitBlock), blocks, file);
+        std::fwrite((*profile_samples)[core].data(), sizeof(uintptr_t), samples, file);
+        const JitBlock* begin = profile_blocks[core];
+        for (std::size_t i = 0; i < samples && blocks; ++i) {
+            const uintptr_t pc = (*profile_samples)[core][i];
+            const JitBlock* it = std::upper_bound(begin, begin + blocks, pc,
+                [](uintptr_t value, const JitBlock& block) { return value < block.entry; });
+            if (it != begin && pc - (it - 1)->entry < (it - 1)->size) ++hot[(it - 1)->location];
+        }
+    }
+    std::vector<std::pair<unsigned, unsigned long long>> ranked;
+    for (const auto& [location, count] : hot) ranked.emplace_back(count, location);
+    std::sort(ranked.rbegin(), ranked.rend());
+    const unsigned long long code_blocks = std::min<std::size_t>(ranked.size(), 400);
+    std::fwrite(&code_blocks, sizeof(code_blocks), 1, file);
+    for (std::size_t i = 0; i < code_blocks; ++i) {
+        const unsigned long long pc = ranked[i].second & ((1ull << 39) - 1);
+        unsigned words[64]{};
+        for (unsigned w = 0; w < 64 && guest_read32; ++w)
+            if (!guest_read32(pc + w * 4, words[w])) break;
+        std::fwrite(&ranked[i].second, sizeof(unsigned long long), 1, file);
+        std::fwrite(words, sizeof(words), 1, file);
+    }
+    std::fclose(file);
+    chmod(path.c_str(), 0666);
+    std::printf("EDEN_PROFILE_DONE samples=%zu,%zu,%zu blocks=%zu,%zu,%zu hot=%llu\n",
+                profile_sample_count[0].load(), profile_sample_count[1].load(), profile_sample_count[2].load(),
+                profile_block_count[0].load(), profile_block_count[1].load(), profile_block_count[2].load(), code_blocks);
+    std::fflush(stdout);
+}
+} // namespace
+
+void PollTrace() {
+    if (pc_sampling && !profile_active.load() &&
+        (access("/app0/profile-start.txt", F_OK) == 0 || access("/data/homebrew/PPSA99008/profile-start.txt", F_OK) == 0)) {
+        unlink("/app0/profile-start.txt");
+        unlink("/data/homebrew/PPSA99008/profile-start.txt");
+        if (!profile_samples) profile_samples = new (std::nothrow) std::array<std::array<uintptr_t, profile_sample_capacity>, 3>;
+        if (profile_samples) {
+            for (auto& count : profile_sample_count) count.store(0);
+            profile_active.store(true, std::memory_order_release);
+            std::printf("EDEN_PROFILE_START\n");
+            std::fflush(stdout);
+            std::thread([] {
+                // 2 kHz per core for 8 s (16,000 samples a core), then the dump.
+                for (unsigned tick = 0; tick < 16000; ++tick) {
+                    for (unsigned core = 0; core < 3; ++core)
+                        if (profile_thread_ready[core].load(std::memory_order_acquire)) pthread_kill(profile_threads[core], SIGUSR2);
+                    std::this_thread::sleep_for(std::chrono::microseconds(500));
+                }
+                profile_active.store(false, std::memory_order_release);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                WriteProfile();
+            }).detach();
+        }
+    }
+    if (trace_active.load(std::memory_order_relaxed)) {
+        if (NowNs() < trace_end_ns) return;
+        trace_active.store(false, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // writers in flight finish
+        const std::size_t count = std::min(trace_count.load(), trace_capacity);
+        const std::string path = std::string(getenv("EDEN_LOG_DIR") ? getenv("EDEN_LOG_DIR") : "/data/prosperoeden/logs") + "/sched.bin";
+        if (FILE* file = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(trace_events, sizeof(TraceEvent), count, file);
+            std::fclose(file);
+            chmod(path.c_str(), 0666);
+        }
+        std::printf("EDEN_TRACE_DONE events=%zu dropped=%zu path=%s\n", count,
+                    trace_count.load() > trace_capacity ? trace_count.load() - trace_capacity : 0, path.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    if (access("/app0/trace-start.txt", F_OK) != 0 && access("/data/homebrew/PPSA99008/trace-start.txt", F_OK) != 0) return;
+    unlink("/app0/trace-start.txt");
+    unlink("/data/homebrew/PPSA99008/trace-start.txt");
+    if (!trace_events) trace_events = new (std::nothrow) TraceEvent[trace_capacity];
+    if (!trace_events) return;
+    trace_count.store(0);
+    trace_end_ns = NowNs() + trace_seconds * 1000000000ll;
+    std::printf("EDEN_TRACE_START seconds=%lld\n", trace_seconds);
+    std::fflush(stdout);
+    trace_active.store(true, std::memory_order_release);
 }
 
 void BeginPcSampling() {
@@ -864,7 +1020,77 @@ void AllocatorCheck() {
     }
 }
 
+#if defined(PS5_NATIVE) && defined(EDEN_DEV_PROFILE)
+// The getter writes through its first argument (calling it without one faulted), so it is
+// called with an output; the setter is tried with the mode as its only argument.
+extern "C" int sceKernelGetCpumodeGame(int*);
+extern "C" int sceKernelSetCpumodeGame(int);
+// Development probe (cpumode-probe.txt in the app folder): each game CPU mode in turn, with
+// what the getters and the clock report after it, then the original mode again. The klog's
+// SceSystemStateMgr lines show the cores' actual clocks.
+int GameCpumode(int& result) {
+    int mode = -1;
+    result = sceKernelGetCpumodeGame(&mode);
+    return mode;
+}
+void ProbeCpumodes() {
+    if (access("/app0/cpumode-probe.txt", F_OK) != 0 &&
+        access("/data/homebrew/PPSA99008/cpumode-probe.txt", F_OK) != 0) return;
+    int got = 0;
+    const int original = GameCpumode(got);
+    std::printf("EDEN_CPUMODE_PROBE original_game=%d get_result=%08x cpumode=%d mhz=%ld\n", original, unsigned(got),
+                sceKernelGetCpumode(), sceKernelGetCpuFrequency() / 1000000);
+    std::fflush(stdout);
+    if (got != 0) return; // the getter failed: do not change anything
+    for (int mode = 0; mode < 8; ++mode) {
+        const int result = sceKernelSetCpumodeGame(mode);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const int now = GameCpumode(got);
+        std::printf("EDEN_CPUMODE_PROBE set=%d result=%08x game=%d cpumode=%d mhz=%ld\n", mode, unsigned(result),
+                    now, sceKernelGetCpumode(), sceKernelGetCpuFrequency() / 1000000);
+        std::fflush(stdout);
+    }
+    const int restored = sceKernelSetCpumodeGame(original);
+    std::printf("EDEN_CPUMODE_PROBE restore=%d result=%08x game=%d cpumode=%d\n", original, unsigned(restored),
+                GameCpumode(got), sceKernelGetCpumode());
+    std::fflush(stdout);
+}
+#endif
+
+#if defined(PS5_NATIVE) && defined(EDEN_DEV_PROFILE)
+extern "C" int sceSystemServiceChangeCpuClock(int);
+// The clock this thread's core actually runs at: dependent additions take one cycle each.
+long MeasuredMhz() {
+    unsigned long long x = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 400000; ++i)
+        asm volatile(".rept 100\n add $1, %0\n .endr" : "+r"(x));
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    return ns > 0 ? static_cast<long>(40000000ull * 1000 / static_cast<unsigned long long>(ns)) : 0;
+}
+// Development probe (cpuclock-probe.txt in the app folder): sceSystemServiceChangeCpuClock with
+// candidate arguments, the measured clock after each, then 3200 again.
+void ProbeCpuClock() {
+    if (access("/app0/cpuclock-probe.txt", F_OK) != 0 &&
+        access("/data/homebrew/PPSA99008/cpuclock-probe.txt", F_OK) != 0) return;
+    std::printf("EDEN_CPUCLOCK_PROBE before measured_mhz=%ld reported_mhz=%ld\n", MeasuredMhz(),
+                sceKernelGetCpuFrequency() / 1000000);
+    std::fflush(stdout);
+    for (const int value : {3500, 3200, 0, 1, 2, 3, 3200}) {
+        const int result = sceSystemServiceChangeCpuClock(value);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        std::printf("EDEN_CPUCLOCK_PROBE set=%d result=%08x measured_mhz=%ld reported_mhz=%ld\n", value,
+                    unsigned(result), MeasuredMhz(), sceKernelGetCpuFrequency() / 1000000);
+        std::fflush(stdout);
+    }
+}
+#endif
+
 void PlatformChecks() {
+#if defined(PS5_NATIVE) && defined(EDEN_DEV_PROFILE)
+    ProbeCpumodes();
+    ProbeCpuClock();
+#endif
 #ifdef PS5_NATIVE
     CheckWorkerTopology();
 #endif
