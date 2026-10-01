@@ -19,6 +19,7 @@
 #include <semaphore>
 #include <stdexcept>
 #include <thread>
+#include <atomic>
 #include <vector>
 #include <latch>
 #include <time.h>
@@ -126,6 +127,61 @@ cpuset_t topology_allowed{};
 bool topology_allowed_valid = false;
 std::atomic<bool> placement_secondary{false};
 std::atomic<unsigned> secondary_reports{};
+// Iterations of integer multiply chains on `cpu` in a fixed time, optionally while another
+// thread runs the same chain on `other` (-1: alone). An SMT sibling shares the core's
+// execution units, so it slows the first thread far more than a CPU on another core does.
+unsigned long long ContendedWork(int cpu, int other) {
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false}, stop{false};
+    std::atomic<unsigned long long> result{0};
+    const auto run = [&](int on, bool measure) {
+        cpuset_t one{};
+        CPU_SET(on, &one);
+        const bool pinned = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one) == 0;
+        sched_yield(); // the new affinity applies when the thread is next scheduled
+        ready.fetch_add(1);
+        if (!pinned) return; // measures nothing: no SMT pairs are inferred
+        while (!go.load(std::memory_order_acquire)) {}
+        // Six independent chains keep the multiplier busy every cycle (throughput bound).
+        unsigned long long v[6] = {1, 2, 3, 4, 5, 6}, iterations = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (int i = 0; i < 64; ++i)
+                for (auto& value : v) value = value * 6364136223846793005ULL + 1442695040888963407ULL;
+            ++iterations;
+        }
+        if (measure) result.store(iterations + ((v[0] ^ v[1] ^ v[2] ^ v[3] ^ v[4] ^ v[5]) & 1));
+    };
+    std::thread first(run, cpu, true);
+    std::thread second;
+    if (other >= 0) second = std::thread(run, other, false);
+    const int threads = other >= 0 ? 2 : 1;
+    while (ready.load() < threads) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    stop.store(true);
+    first.join();
+    if (second.joinable()) second.join();
+    return result.load();
+}
+
+// The measurement MeasuredSiblingPairs uses (host checks replace it).
+unsigned long long (*contention_probe)(int cpu, int other) = ContendedWork;
+
+// The console's CPUID reports x2APIC ID 0 on every CPU, so cores are told apart by contention:
+// CPUs 2n and 2n+1 are taken as SMT siblings when CPU 1 slows CPU 0 and CPU 2 does not.
+bool MeasuredSiblingPairs(const cpuset_t& allowed) {
+    if (!CPU_ISSET(0, &allowed) || !CPU_ISSET(1, &allowed) || !CPU_ISSET(2, &allowed)) return false;
+    unsigned long long alone = 0, with_1 = 0, with_2 = 0;
+    for (int round = 0; round < 2; ++round) { // keep each case's best: other load only lowers it
+        alone = std::max(alone, contention_probe(0, -1));
+        with_1 = std::max(with_1, contention_probe(0, 1));
+        with_2 = std::max(with_2, contention_probe(0, 2));
+    }
+    const bool pairs = alone && with_1 * 100 < alone * 85 && with_2 * 100 > alone * 92;
+    std::printf("EDEN_WORKER_SMT_PROBE alone=%llu with_cpu1=%llu with_cpu2=%llu pairs=%d\n", alone, with_1, with_2, pairs);
+    return pairs;
+}
+
 void CheckWorkerTopology() {
     cpuset_t original{};
     if (__get_cpuid_max(0, nullptr) < 0xb ||
@@ -158,9 +214,19 @@ void CheckWorkerTopology() {
             std::memcmp(&original, &restored, 8))
             throw std::runtime_error("Cannot restore topology-probe thread affinity");
     }
+    if (count != cores.size() && MeasuredSiblingPairs(original)) {
+        count = 0;
+        for (unsigned cpu = 0; cpu < 64; ++cpu) {
+            cpu_core[cpu] = CPU_ISSET(cpu, &original) ? static_cast<int>(cpu / 2) : -1;
+            if (cpu_core[cpu] < 0 || cpu % 2 || count == cores.size()) continue;
+            cores[count] = cpu / 2;
+            worker_cpus[count++] = cpu;
+        }
+    }
     worker_topology_ready = count == cores.size();
     topology_allowed = original;
     topology_allowed_valid = true;
+    secondary_cpus = 0;
     if (worker_topology_ready) {
         for (unsigned cpu = 0; cpu < 64; ++cpu) {
             if (!CPU_ISSET(cpu, &original) || cpu_core[cpu] < 0) continue;
@@ -468,8 +534,32 @@ void ReportGpuThread(unsigned frame) {
         std::printf("%s%llu", slot ? "," : "", render_conditions[slot].load(std::memory_order_relaxed));
     std::printf("\n");
     const auto window = Eden::Fastmem::WindowStats();
+#ifdef EDEN_DEV_PROFILE
+    {
+        // Where the latest fastmem faults were: data address relative to the window, by code site.
+        static std::uint64_t pcs[1024], addresses[1024];
+        const std::size_t count = Eden::Fastmem::FaultSamples(pcs, addresses, 1024);
+        std::map<std::uint64_t, unsigned> sites;
+        unsigned outside = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            ++sites[pcs[i]];
+            outside += addresses[i] < window.window || addresses[i] - window.window >= (1ull << 38);
+        }
+        std::vector<std::pair<unsigned, std::uint64_t>> ranked;
+        for (const auto& [pc, n] : sites) ranked.emplace_back(n, pc);
+        std::sort(ranked.rbegin(), ranked.rend());
+        std::printf("EDEN_FASTMEM_FAULTS samples=%zu sites=%zu outside_window=%u top=", count, sites.size(), outside);
+        for (std::size_t i = 0; i < ranked.size() && i < 8; ++i) {
+            std::uint64_t address = 0;
+            for (std::size_t j = 0; j < count; ++j) if (pcs[j] == ranked[i].second) { address = addresses[j]; break; }
+            std::printf("%s%llx:%u@%llx", i ? "," : "", static_cast<unsigned long long>(ranked[i].second), ranked[i].first,
+                        static_cast<unsigned long long>(address - window.window));
+        }
+        std::printf("\n");
+    }
+#endif
     std::printf("EDEN_FASTMEM window=%llx pages=%llu chunks=%llu direct_reads=%llu direct_writes=%llu "
-                "faults=%llu maps=%llu unmaps=%llu protects=%llu kernel_calls=%llu kernel_ns=%llu failures=%llu\n",
+                "faults=%llu maps=%llu unmaps=%llu protects=%llu kernel_calls=%llu kernel_ns=%llu failures=%llu highest=%llx outside=%llu large=%llu\n",
                 static_cast<unsigned long long>(window.window), static_cast<unsigned long long>(window.mapped_pages),
                 static_cast<unsigned long long>(window.aliased_chunks),
                 static_cast<unsigned long long>(window.direct_reads),
@@ -478,7 +568,10 @@ void ReportGpuThread(unsigned frame) {
                 static_cast<unsigned long long>(window.map_calls), static_cast<unsigned long long>(window.unmap_calls),
                 static_cast<unsigned long long>(window.protect_calls),
                 static_cast<unsigned long long>(window.kernel_calls), static_cast<unsigned long long>(window.kernel_ns),
-                static_cast<unsigned long long>(window.failures));
+                static_cast<unsigned long long>(window.failures),
+                static_cast<unsigned long long>(window.highest_mapped),
+                static_cast<unsigned long long>(window.outside_maps),
+                static_cast<unsigned long long>(window.large_blocks));
     // Guest cores record their owner CPU clocks at their next JIT exit.
     Snapshot();
 }
@@ -677,7 +770,7 @@ extern "C" void eden_jit_block(unsigned, unsigned long long, const void*, unsign
 #ifdef EDEN_DEV_PROFILE
 extern "C" void eden_jit_block(unsigned core, unsigned long long location, const void* entry,
                                unsigned long long size) {
-    if (core != 0) return;
+    if (core != 0 || !pc_sampling) return;
     if (!core0_blocks) core0_blocks = new JitBlock[jit_block_capacity];
     std::size_t count = core0_block_count.load(std::memory_order_relaxed);
     const auto address = reinterpret_cast<uintptr_t>(entry);

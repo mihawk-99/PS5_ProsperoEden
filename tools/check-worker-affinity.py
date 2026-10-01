@@ -14,6 +14,8 @@ code=r'''
 #include <stdexcept>
 #include <cassert>
 #include <cstdint>
+#include <thread>
+#include <chrono>
 using cpuset_t=uint64_t;
 #undef CPU_ISSET
 #undef CPU_SET
@@ -35,6 +37,8 @@ static int cpuset_setaffinity(int,int,int,size_t n,const cpuset_t* in){
 }
 '''+body+r'''
 int main(){
+ // No contention between any CPUs unless a case says otherwise (no threads in the mock).
+ contention_probe=[](int,int){return 100ull;};
  for(unsigned i=0;i<64;++i) apics[i]=i;
  CheckWorkerTopology();assert(worker_topology_ready && current==0x1fff);
  assert((worker_cpus==std::array<unsigned,5>{0,2,4,6,8}));
@@ -51,6 +55,15 @@ int main(){
  fail_mask=0;level_type=0;CheckWorkerTopology();assert(!worker_topology_ready && current==0x1fff);
  level_type=1;CheckWorkerTopology();assert(worker_topology_ready);
  fail_mask=16;allowed=current;PinWorker(4,allowed);assert(allowed==0x1fff && current==0x1fff);
+ // The console: CPUID gives every CPU x2APIC ID 0; SMT pairs are measured by contention.
+ fail_mask=0;current=0x1fff;
+ for(unsigned i=0;i<64;++i) apics[i]=0;
+ contention_probe=[](int,int other){return other==1?50ull:100ull;};
+ CheckWorkerTopology();assert(worker_topology_ready && (worker_cpus==std::array<unsigned,5>{0,2,4,6,8}) && current==0x1fff);
+ assert(cpu_core[0]==0 && cpu_core[1]==0 && cpu_core[12]==6);
+ contention_probe=[](int,int){return 100ull;};
+ CheckWorkerTopology();assert(!worker_topology_ready && current==0x1fff);
+ for(unsigned i=0;i<64;++i) apics[i]=i;
  fail_mask=0;fail_restore=true;bool threw=false;
  try{CheckWorkerTopology();}catch(const std::runtime_error&){threw=true;}
  assert(threw);
@@ -61,4 +74,4 @@ with tempfile.TemporaryDirectory() as tmp:
     exe=Path(tmp)/'affinity'
     subprocess.run(['c++','-std=c++20','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-x','c++','-','-o',str(exe)],input=code,text=True,check=True)
     subprocess.run([str(exe)],check=True)
-print('Worker topology: PASS physical sibling exclusion, OS/APIC permutations, allowed masks, fallback and restoration failures')
+print('Worker topology: PASS physical sibling exclusion, OS/APIC permutations, measured SMT pairs, allowed masks, fallback and restoration failures')

@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #ifdef __linux__
 #include <ucontext.h>
 #endif
 
-// A32 fastmem for the PS5 port. HostMemory reserves a window covering the 32-bit guest
-// address space, aliases guest pages into it at the kernel's 16 KiB granularity and keeps
-// one access byte per 4 KiB page below it. JIT loads/stores test that byte and access the
-// window directly, or take the page-table path for blocked pages (unaliased, read-only or
-// GPU-tracked) without faulting. The fault handler only covers races with remapping.
+// Fastmem for the PS5 port. HostMemory reserves a window covering as much of the 39-bit guest
+// address space as the console allows, aliases guest pages into it at the kernel's 16 KiB
+// granularity and keeps one access byte per 4 KiB page below it. JIT loads/stores (32- and
+// 64-bit guests) test that byte and access the window directly, or take the page-table path
+// for blocked pages (unaliased, read-only or GPU-tracked) without faulting. The fault handler
+// only covers races with remapping.
 namespace Eden::Fastmem {
 
 // Select before Core::System (and so HostMemory) is constructed.
@@ -24,11 +26,16 @@ struct Stats {
     std::uint64_t map_calls, unmap_calls, protect_calls; // HostMemory requests
     std::uint64_t kernel_calls, kernel_ns; // mapping system calls and their duration
     std::uint64_t failures;        // mappings the kernel refused (chunk left unaliased)
+    std::uint64_t highest_mapped;  // end of the highest guest range Eden mapped
+    std::uint64_t outside_maps;    // mappings reaching past the window (page-table path there)
+    std::uint64_t large_blocks;    // 2 MiB blocks mapped as one large mapping
 };
 Stats WindowStats() noexcept;
 
 // JIT faults redirected to an access fallback (dynarmic exception handler): races only.
 std::uint64_t Faults() noexcept;
+// The latest faults' code and data addresses (up to capacity); returns how many were copied.
+std::size_t FaultSamples(std::uint64_t* pcs, std::uint64_t* addresses, std::size_t capacity) noexcept;
 
 // Registers of an interrupted thread in a signal handler's context argument
 // (targets without PS5_NATIVE, such as dynarmic, still build for the console).

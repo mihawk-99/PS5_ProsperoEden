@@ -5,6 +5,7 @@
 // dynarmic then recompiles the access onto the page-table path. Guest code runs on
 // fiber stacks with ample room, so no alternate signal stack is used.
 #include <signal.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -30,6 +31,11 @@ struct CodeRange {
 extern "C" bool eden_lazy_memory_fault(void* address) __attribute__((weak));
 std::array<CodeRange, 64> ranges;
 std::atomic<std::uint64_t> fault_count{0};
+// The latest faults (code address, data address), for the performance report.
+struct FaultSample {
+    std::atomic<std::uint64_t> pc, address;
+};
+std::array<FaultSample, 1024> fault_samples;
 struct sigaction previous_segv{}, previous_bus{};
 std::once_flag install_once;
 bool installed = false;
@@ -55,7 +61,9 @@ void Handle(int signal, siginfo_t* info, void* context) {
         if (!begin || pc < begin || pc >= range.end.load(std::memory_order_relaxed)) continue;
         const auto* callback = range.callback.load(std::memory_order_acquire);
         if (!callback) break;
-        fault_count.fetch_add(1, std::memory_order_relaxed);
+        const auto slot = fault_count.fetch_add(1, std::memory_order_relaxed) % fault_samples.size();
+        fault_samples[slot].pc.store(pc, std::memory_order_relaxed);
+        fault_samples[slot].address.store(reinterpret_cast<std::uint64_t>(info->si_addr), std::memory_order_relaxed);
         const FakeCall call = (*callback)(pc);
         auto& sp = Eden::Fastmem::ContextRsp(context);
         sp -= sizeof(std::uint64_t);
@@ -127,5 +135,14 @@ void ExceptionHandler::SetFastmemCallback(std::function<FakeCall(u64)> cb) {
 namespace Eden::Fastmem {
 std::uint64_t Faults() noexcept {
     return Dynarmic::Backend::fault_count.load(std::memory_order_relaxed);
+}
+std::size_t FaultSamples(std::uint64_t* pcs, std::uint64_t* addresses, std::size_t capacity) noexcept {
+    const auto total = Dynarmic::Backend::fault_count.load(std::memory_order_relaxed);
+    const std::size_t count = std::min<std::size_t>({capacity, Dynarmic::Backend::fault_samples.size(), total});
+    for (std::size_t i = 0; i < count; ++i) {
+        pcs[i] = Dynarmic::Backend::fault_samples[i].pc.load(std::memory_order_relaxed);
+        addresses[i] = Dynarmic::Backend::fault_samples[i].address.load(std::memory_order_relaxed);
+    }
+    return count;
 }
 } // namespace Eden::Fastmem

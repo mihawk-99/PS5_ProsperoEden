@@ -550,6 +550,25 @@ foreach(bits 32 64)
           endif()
           string(REPLACE "std::uint32_t(16_MiB)" "std::uint32_t(${jit_cache_sizes})" wrapper "${wrapper}")
       endif()
+    # Keep the guest address-space bound on fastmem accesses (Eden's Auto accuracy lifts it
+    # to 64 bits): the window covers 39 bits, and an address above it must not reach whatever
+    # lies past the reservation; it takes the access's fallback instead.
+    set(fastmem_bits_old "        config.unsafe_optimizations = true;\n        config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;\n        config.fastmem_address_space_bits = 64;\n")
+    string(FIND "${wrapper}" "${fastmem_bits_old}" fastmem_bits_at)
+    if(bits EQUAL 64 AND fastmem_bits_at LESS 0)
+        message(FATAL_ERROR "Pinned Auto CPU accuracy configuration changed")
+    endif()
+    string(REPLACE "${fastmem_bits_old}" "        config.unsafe_optimizations = true;\n        config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;\n" wrapper "${wrapper}")
+    if(bits EQUAL 64 AND PS5_NATIVE)
+        # The window covers fewer bits than the guest when the console will not reserve 512 GiB.
+        set(fastmem_width_old "        config.fastmem_address_space_bits = std::uint32_t(address_space_bits);")
+        string(FIND "${wrapper}" "${fastmem_width_old}" fastmem_width_at)
+        if(fastmem_width_at LESS 0)
+            message(FATAL_ERROR "Pinned fastmem width configuration changed")
+        endif()
+        string(REPLACE "${fastmem_width_old}" "        config.fastmem_address_space_bits = (std::min)(std::uint32_t(address_space_bits), eden_fastmem_window_bits());" wrapper "${wrapper}")
+        string(PREPEND wrapper "extern \"C\" unsigned eden_fastmem_window_bits();\n")
+    endif()
     set(derived "${PORT_BUILD_DIR}/arm_dynarmic_${bits}.cpp")
     if(EDEN_DEV_PROFILE)
         string(PREPEND wrapper "#include \"${EDEN_PORT_DIR}/performance.h\"\n")
@@ -842,6 +861,17 @@ if(audio_shutdown_offset LESS 0)
 endif()
 string(REPLACE "${old_audio_shutdown}"
     "        if (audio_core) audio_core->Shutdown();\n${old_audio_shutdown}" system_source "${system_source}")
+# The cheat engine's looping timing event reads HID through the service manager; it was
+# destroyed after the services, and core timing runs again during their teardown
+# (SyncPause(false)), so a game with cheats crashed on the HostTiming thread when stopped.
+# Its destructor unschedules the event and waits for a callback in progress.
+set(old_cheat_shutdown "        kernel.CloseServices();")
+string(FIND "${system_source}" "${old_cheat_shutdown}" cheat_shutdown_offset)
+if(cheat_shutdown_offset LESS 0)
+    message(FATAL_ERROR "Pinned service shutdown changed; review cheat engine lifetime.")
+endif()
+string(REPLACE "${old_cheat_shutdown}"
+    "        cheat_engine.reset();\n${old_cheat_shutdown}" system_source "${system_source}")
 # Kernel intrusive lists refer into DeviceMemory even during failed Load unwind.
 # Declare the backing first so reverse member destruction releases it last.
 string(REPLACE "    std::optional<Core::DeviceMemory> device_memory;\n" "" system_source "${system_source}")

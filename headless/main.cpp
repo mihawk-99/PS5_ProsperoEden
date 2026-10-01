@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include "assets_dir.h"
 #include "gpu_failure.h"
@@ -257,6 +258,12 @@ int main(int argc, char** argv) {
         // A game that faulted early in its boot is restarted (at most four times per launch).
         std::string relaunch_game;
         unsigned guest_fault_retries = 0;
+#ifdef EDEN_DEV_ROM_ID
+        // Test runs end with stop-game.txt in the app folder: the game shuts down through the
+        // ordinary path and the process exits, instead of the title being killed (killing a
+        // title rendering at 8K preceded both console power-offs).
+        std::atomic<bool> stop_requested{false};
+#endif
 #ifdef EDEN_DEV_VULKAN
         std::string recovery_mode;
         std::ifstream(Eden::AppFile("backend-recovery.txt")) >> recovery_mode;
@@ -453,8 +460,9 @@ int main(int argc, char** argv) {
         // Keep emulator threads off guest cores 0-2 and their SMT siblings (Vulkan):
         // +17% in the heaviest measured window of a racing game.
         Eden::Performance::SetSecondaryPlacement(backend == Eden::GraphicsBackend::Vulkan);
-        // A32 fastmem window (direct JIT accesses to aliased guest memory): opt-in with dev-settings
-        // fastmem=on; on the console it is slower than the page-table path.
+        // Fastmem window (direct JIT accesses to aliased guest memory, 32- and 64-bit guests): opt-in
+        // with dev-settings fastmem=on. On the console it has not been faster than the page-table
+        // path (docs/PERFORMANCE_FINDINGS.md), and it needs the guest RAM allocated up front.
         Eden::Fastmem::Request(false);
 #ifdef EDEN_DEV_VULKAN
         Settings::values.async_presentation = backend == Eden::GraphicsBackend::Vulkan;
@@ -919,6 +927,15 @@ int main(int argc, char** argv) {
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                         if (++command_poll >= 25) {
                             command_poll = 0;
+                            std::error_code stop_error;
+                            if (std::filesystem::remove(Eden::AppFile("stop-game.txt"), stop_error)) {
+                                Eden::Report("shutdown", "Stop requested by the test run");
+                                stop_requested = true;
+                                std::lock_guard lock(completion->mutex);
+                                completion->return_to_menu = true;
+                                completion->wake.notify_one();
+                                break;
+                            }
                             std::ifstream command(Eden::AppFile("compat-input.txt"));
                             if (development_input.Read(command, command_now))
                                 std::printf("EDEN_DEV_INPUT sequence=%llu buttons=%x\n",
@@ -1132,6 +1149,14 @@ int main(int argc, char** argv) {
             pad.reset();
             LOG_INFO(Frontend, "EDEN_DEVICE_FRONTEND_PASS");
         }
+#ifdef EDEN_DEV_ROM_ID
+        if (stop_requested) {
+            Eden::Report("shutdown", "Stopped on request; exiting");
+            std::fflush(stdout);
+            std::fflush(stderr);
+            return 0;
+        }
+#endif
 #ifdef PS5_NATIVE
         if (return_to_menu) continue;
 #endif

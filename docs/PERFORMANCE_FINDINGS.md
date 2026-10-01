@@ -1,4 +1,4 @@
-# CPU performance: findings (2026-09-30)
+# CPU performance: findings (2026-09-30, 2026-10-01)
 
 Why The Legend of Zelda: Tears of the Kingdom (1.1.1, 60 FPS cheat) holds about 40 fps at 4K, and
 what would take it to 60. Measured on my console with the development build: Hyrule after loading
@@ -61,3 +61,49 @@ avoids it on its own. Pinning by measured sibling pairs is worth about 2%.
 3. **Host overhead on guest cores** (kernel waits, SVC dispatch, scheduler): a few percent at most.
 
 Excluded: lowering CPU accuracy or other accuracy trade-offs, and emulated-CPU underclocking.
+
+## What the three routes gave (2026-10-01)
+
+All runs: TotK 1.1.1 with the 60 FPS cheat, 4K, standing after loading a save, ended through
+Eden's own shutdown (`tools/console-run.py`), never by closing the title.
+
+### Thread placement: works now, small gain
+
+The probe now falls back to measuring contention when CPUID cannot tell cores apart: a
+thread on CPU 0 doing throughput-bound integer work runs alone, with CPU 1 busy, and with CPU 2
+busy. On the console CPU 1 halves CPU 0's rate and CPU 2 leaves it alone
+(`EDEN_WORKER_SMT_PROBE alone=147058 with_cpu1=74142 with_cpu2=147335`), so CPUs 2n and 2n+1
+are siblings: guest cores 0-2 go to CPUs 0, 2, 4, core 3 to 6, the GPU thread to 8, other
+emulator threads to 7 and 9-12. TotK measured 39.7-41.9 fps with it against 40.5 without:
+within run-to-run spread.
+
+### Fastmem for 64-bit games: built, correct, no gain
+
+- The console reserves at most 256 GiB in one piece above RADV's range (user space ends at
+  1 TiB), so the window covers 38 of the 39 guest address bits; the JIT bounds fastmem to it.
+- Unchecked, fault-based fastmem (upstream dynarmic) faulted about a million times per boot:
+  thread stacks and TLS are scattered 4 KiB pages that cannot be aliased at the kernel's 16 KiB
+  granularity, so every new block touching them faulted once and was recompiled. The boot
+  took longer than the whole run.
+- Checked fastmem (the 32-bit design extended: one access byte per page of the window, a
+  range test, then the direct access; about 7 instructions instead of 14, no faults) ran with
+  zero faults, 86% of mapped pages direct, and 2 MiB mappings for 2.5 GiB of the window.
+  Reads through the window cost the same as through the backing (12.5 ns per random read).
+- TotK: 32.6-33.0 fps with it against 39.7 without. Core 0's work per frame dropped about 7%,
+  but its frames got longer: it spent more time blocked in the kernel (13.8% of its samples
+  against 5.8%), for a reason not yet found.
+
+It stays a development option (`dev-settings fastmem=on`): it costs the guest RAM up front
+(4 GiB instead of what the game touches) and has not paid off.
+
+### Where TotK's frame goes
+
+Each guest core is idle 15-25% of the time even when it shows 95% busy: about 13,000 short
+waits per 5 s per core (`EDEN_DEV_GUEST idleN`), the game's threads waiting on each other. The
+work that remains is the game's own code; removing most of the page-table lookup did not
+shorten it, which points at memory latency rather than instruction count. The console runs
+its CPU at 3.2 GHz in this mode (`SceSystemStateMgr` lines in klog).
+
+So 60 fps in TotK's open world is not reachable through these three routes. What is left
+would change behaviour or the system (a higher CPU clock, which needs a system setting, or
+accuracy trade-offs, which are excluded).
