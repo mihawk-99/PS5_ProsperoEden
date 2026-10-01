@@ -11,6 +11,9 @@ namespace Eden::Performance {
 void RegisterWorker(const char* name);
 // Development: keep other named threads off guest cores 0-2 and their SMT siblings.
 void SetSecondaryPlacement(bool enabled);
+#ifdef PS5_NATIVE
+void SetWorkerCpus(const std::array<unsigned, 5>& cpus);
+#endif
 void PlatformChecks();
 // Main thread only, between GPU readiness and guest shutdown.
 void Snapshot();

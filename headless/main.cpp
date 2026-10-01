@@ -491,6 +491,12 @@ int main(int argc, char** argv) {
                 } else if (entry.starts_with("pc_core=") && entry.size() == 9 && entry[8] >= '0' && entry[8] <= '3') {
                     // Host PC samples from this guest core instead of core 0 (with --pc-sample).
                     Eden::Performance::pc_sample_core = static_cast<unsigned>(entry[8] - '0');
+#ifdef PS5_NATIVE
+                } else if (entry.starts_with("worker_cpus=")) {
+                    std::array<unsigned, 5> cpus{};
+                    if (std::sscanf(entry.c_str() + 12, "%u,%u,%u,%u,%u", &cpus[0], &cpus[1], &cpus[2], &cpus[3], &cpus[4]) == 5)
+                        Eden::Performance::SetWorkerCpus(cpus);
+#endif
                 } else if (entry == "replay=off") {
                     // The profile title takes controller and runner input instead of the timed replay.
                 } else if (entry == "large_pages=off") {
