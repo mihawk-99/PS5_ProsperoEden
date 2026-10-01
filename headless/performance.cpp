@@ -278,6 +278,14 @@ void CheckCpuClocks() {
 }
 }
 
+#ifdef PS5_NATIVE
+// Development: pin guest cores 0-2, the GPU thread and core 3 to these CPUs (experiments).
+void SetWorkerCpus(const std::array<unsigned, 5>& cpus) {
+    worker_cpus = cpus;
+    worker_topology_ready = true;
+    std::printf("EDEN_WORKER_TOPOLOGY ready=1 forced=1 cpus=%u,%u,%u,%u,%u\n", cpus[0], cpus[1], cpus[2], cpus[3], cpus[4]);
+}
+#endif
 void SetSecondaryPlacement(bool enabled) {
 #ifdef PS5_NATIVE
     placement_secondary.store(enabled, std::memory_order_relaxed);
