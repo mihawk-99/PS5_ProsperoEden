@@ -34,6 +34,12 @@
 #include <sys/cpuset.h>
 #endif
 
+// Spread cores experiment (src: headless/CMakeLists.txt, k_thread.cpp derivation).
+extern "C" {
+bool eden_spread_cores = false;
+unsigned long long eden_spread_widened = 0; // thread affinity masks given core 3
+}
+
 namespace Eden::Performance {
 namespace {
 constexpr std::array names{"CPUCore_0", "CPUCore_1", "CPUCore_2", "CPUCore_3",
@@ -576,6 +582,7 @@ void ReportGpuThread(unsigned frame) {
     for (unsigned slot = 0; slot < render_conditions.size(); ++slot)
         std::printf("%s%llu", slot ? "," : "", render_conditions[slot].load(std::memory_order_relaxed));
     std::printf("\n");
+    if (eden_spread_cores) std::printf("EDEN_SPREAD widened=%llu\n", eden_spread_widened);
     const auto window = Eden::Fastmem::WindowStats();
 #ifdef EDEN_DEV_PROFILE
     {

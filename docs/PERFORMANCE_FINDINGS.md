@@ -147,3 +147,17 @@ the hottest block has 0.9% of the samples, the top 30 blocks 7.7%, the hottest 2
 guest code 18%. No small set of guest routines dominates, so replacing a few with host code
 would not help much; a gain has to come from all translated code. JIT code already sits on
 2 MiB pages.
+
+## More cores for the game's threads: no gain (2026-10-01)
+
+Experiment (`dev-settings spread_cores=on`): application threads allowed on guest core 0, 1 or
+2 may also run on core 3, which the system leaves idle; only the scheduler's affinity is
+widened (the game still sees cores 0-2, and `GetCurrentProcessorNumber` reports a thread's home
+core on core 3). Core 3 then gets a game core's JIT cache, and the heap is reserved at 4095 MiB
+(TotK's fourth JIT instance took it past 3 GiB; the heap commits on demand).
+
+TotK at 4K: core 3 went from 99% idle to 63% busy running the six workers, the other cores'
+idle time rose to 27-46%, and the frame stayed at 25.1 ms (39.6 fps). Each worker still runs
+8-11 ms per frame. The frame is a chain of dependent jobs across the workers, not threads
+queuing for a core: more cores leave it unchanged, and only faster execution of each job
+shortens it. 60 fps needs that chain about 1.5 times faster.

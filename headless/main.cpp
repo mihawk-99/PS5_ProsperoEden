@@ -47,6 +47,7 @@
 #include "performance.h"
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
+extern "C" bool eden_spread_cores;
 #include "prosperoeden/frontend.h"
 extern "C" void ps5_opengl_heap_snapshot(const char*, unsigned);
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
@@ -505,6 +506,9 @@ int main(int argc, char** argv) {
                     if (std::sscanf(entry.c_str() + 12, "%u,%u,%u,%u,%u", &cpus[0], &cpus[1], &cpus[2], &cpus[3], &cpus[4]) == 5)
                         Eden::Performance::SetWorkerCpus(cpus);
 #endif
+                } else if (entry == "spread_cores=on") {
+                    // Experiment: game threads of cores 0-2 may also run on core 3 (CMakeLists.txt).
+                    eden_spread_cores = true;
                 } else if (entry == "replay=off") {
                     // The profile title takes controller and runner input instead of the timed replay.
                 } else if (entry == "large_pages=off") {
