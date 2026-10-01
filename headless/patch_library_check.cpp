@@ -66,5 +66,13 @@ int main() {
     const auto found = Find("/p", 0x0100F2C0115B6000ull, "168DD518D925C7A3F00D", list, read);
     assert(found.size() == 4 && found[3].kind == Kind::Pchtxt && found[3].name == "60fps/exefs/a.pchtxt");
     assert(std::find(listed.begin(), listed.end(), "/p/titles/01007EF00011E000") == listed.end());
+    assert(found[0].build == "168dd518d925c7a3" && found[3].build == "168dd518d925c7a3");
+
+    // Every build: both cheat files and the bracketed mod folder's .pchtxt; not the loose one,
+    // which sits in no folder of this game.
+    const auto all = Find("/p", 0x0100F2C0115B6000ull, "", list, read);
+    assert(all.size() == 5);
+    assert(std::count_if(all.begin(), all.end(), [](const Entry& e) { return e.build == "9a10ed9435c06733"; }) == 1);
+    assert(std::count_if(all.begin(), all.end(), [](const Entry& e) { return e.kind == Kind::Pchtxt; }) == 1);
     std::printf("patch library: all checks passed\n");
 }

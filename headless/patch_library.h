@@ -34,6 +34,7 @@ struct Entry {
     Kind kind{};
     std::string text;   // a cheat's [name] block, or the whole .pchtxt
     std::string master; // a cheat file's {master} blocks
+    std::string build;  // the build it is made for: first 16 hex digits, lower case
 };
 
 inline constexpr std::string_view kModFolder = "ProsperoEden Patches";
@@ -108,6 +109,8 @@ inline std::vector<Entry> ParseCheats(std::string_view text, const std::string& 
             entry.kind = Kind::Cheat;
             entry.group = GroupKey(entry.name);
             entry.text = line + "\n";
+            const auto slash = source.find_last_of('/');
+            entry.build = Lower(source.substr(slash + 1, 16));
             entries.push_back(std::move(entry));
             current = &entries.back();
             current_has_code = false;
@@ -147,19 +150,22 @@ inline bool SameBuild(std::string_view a, std::string_view b) {
 using Lister = std::function<std::vector<std::pair<std::string, bool>>(const std::string&)>;
 using Reader = std::function<bool(const std::string&, std::string&)>;
 
-// Every entry in `root` for this build. Title ID folders of other games are not entered.
+// Every entry in `root` for this build, or with an empty build_id every build's entries that sit
+// in a folder whose name holds this game's title ID ("0100...", "Tears [0100...]"). Title ID folders of other games are not entered.
 inline std::vector<Entry> Find(const std::string& root, std::uint64_t title_id, const std::string& build_id,
                                const Lister& list, const Reader& read) {
     std::vector<Entry> found;
-    if (build_id.size() < 16) return found;
+    const bool any_build = build_id.empty();
+    if (!any_build && build_id.size() < 16) return found;
     char title[17];
     std::snprintf(title, sizeof(title), "%016llx", static_cast<unsigned long long>(title_id));
-    const std::string build = Lower(build_id.substr(0, 16));
+    const std::string build = any_build ? std::string{} : Lower(build_id.substr(0, 16));
     struct Pending {
         std::string path;
         int depth;
+        bool in_title; // inside a folder named for this game
     };
-    std::vector<Pending> pending{{root, 0}};
+    std::vector<Pending> pending{{root, 0, false}};
     unsigned visited = 0;
     while (!pending.empty() && visited < 50000) {
         const Pending dir = pending.back();
@@ -177,11 +183,15 @@ inline std::vector<Entry> Find(const std::string& root, std::uint64_t title_id, 
                 for (const char c : lower) if (std::isxdigit(static_cast<unsigned char>(c))) digits += c;
                 const bool title_folder = digits.size() == 16 && digits.starts_with("01") &&
                     lower.size() <= 18 && (lower.size() == 16 || (lower.front() == '[' && lower.back() == ']'));
-                if ((!title_folder || digits == title) && dir.depth < 10) pending.push_back({path, dir.depth + 1});
+                if ((!title_folder || digits == title) && dir.depth < 10)
+                    pending.push_back({path, dir.depth + 1, dir.in_title || lower.find(title) != std::string::npos});
                 continue;
             }
+            if (any_build && !dir.in_title) continue;
             const std::string relative = path.substr(root.size() + 1);
-            if (dir_name == "cheats" && lower == build + ".txt") {
+            const bool cheat_file = lower.size() == 20 && lower.ends_with(".txt") &&
+                std::all_of(lower.begin(), lower.end() - 4, [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); });
+            if (dir_name == "cheats" && cheat_file && (any_build || lower == build + ".txt")) {
                 std::string text;
                 if (read(path, text)) {
                     auto entries = ParseCheats(text, relative);
@@ -189,7 +199,7 @@ inline std::vector<Entry> Find(const std::string& root, std::uint64_t title_id, 
                 }
             } else if (lower.ends_with(".pchtxt")) {
                 std::string text;
-                if (read(path, text) && SameBuild(PchtxtBuildId(text), build)) {
+                if (read(path, text) && (any_build ? PchtxtBuildId(text).size() >= 16 : SameBuild(PchtxtBuildId(text), build))) {
                     Entry entry;
                     entry.kind = Kind::Pchtxt;
                     entry.source = relative;
@@ -202,6 +212,7 @@ inline std::vector<Entry> Find(const std::string& root, std::uint64_t title_id, 
                             break;
                         }
                     entry.name = shown;
+                    entry.build = PchtxtBuildId(text).substr(0, 16);
                     entry.text = std::move(text);
                     found.push_back(std::move(entry));
                 }
