@@ -161,3 +161,34 @@ idle time rose to 27-46%, and the frame stayed at 25.1 ms (39.6 fps). Each worke
 8-11 ms per frame. The frame is a chain of dependent jobs across the workers, not threads
 queuing for a core: more cores leave it unchanged, and only faster execution of each job
 shortens it. 60 fps needs that chain about 1.5 times faster.
+
+## Critical path of TotK's frame (2026-10-01)
+
+`tools/critical-path.py` walks each frame back from the guest thread that presents it, through
+the guest threads that woke it, for one frame period. TotK at 4K, 100 frames:
+
+| On the critical path, per 25 ms frame | ms | share |
+| --- | --- | --- |
+| guest code (translated) | 22.81 | 91.0% |
+| `SleepThread` (the game's yields and sleeps) | 0.71 | 2.8% |
+| runnable, waiting for a core | 0.52 | 2.1% |
+| wake latency (signal to running) | 0.35 | 1.4% |
+| in signal and unlock calls | 0.30 | 1.2% |
+| condition waits no guest thread signalled | 0.25 | 1.0% |
+| service requests (presentation) | 0.10 | 0.4% |
+
+The chain moves between two groups of three workers. Emulator waits on it total about 1.5 ms:
+removing all of them would give about 6%. The frame is the game's own code.
+
+## Fastmem, measured on the critical path (2026-10-01)
+
+- Checked fastmem as built (`fastmem=on`): guest code on the critical path 27.8 ms per frame
+  against 22.8 ms; every worker about 20% slower. Thread stacks are scattered 4 KiB pages the
+  window cannot alias, so their accesses detoured to the out-of-line page-table path.
+- With stack accesses (addresses from SP or x29) kept on the inline page-table path: 23.2 ms
+  against 22.8 ms (38.8 against 39.7 fps). Taking the page-table lookup off heap accesses
+  buys nothing.
+
+So neither the number of instructions around a memory access nor the page-table load on its
+address is what limits TotK's code; the SDK offers no CPU performance counters to show what
+does.
