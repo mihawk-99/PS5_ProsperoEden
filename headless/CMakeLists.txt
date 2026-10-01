@@ -544,7 +544,8 @@ foreach(bits 32 64)
       # Only the active architecture allocates these caches; core3/host stay 16 MiB.
       if(PS5_NATIVE)
           if(bits EQUAL 64)
-              set(jit_cache_sizes "m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 16_MiB")
+              # Core 3 runs game code too with spread cores (below): give it a game core's cache.
+              set(jit_cache_sizes "m_core_index == 0 ? 256_MiB : (m_core_index < 3 || eden_spread_cores) ? 192_MiB : 16_MiB")
           else()
               set(jit_cache_sizes "m_core_index == 0 ? 512_MiB : m_core_index < 3 ? 64_MiB : 16_MiB")
           endif()
@@ -569,6 +570,7 @@ foreach(bits 32 64)
         string(REPLACE "${fastmem_width_old}" "        config.fastmem_address_space_bits = (std::min)(std::uint32_t(address_space_bits), eden_fastmem_window_bits());" wrapper "${wrapper}")
         string(PREPEND wrapper "extern \"C\" unsigned eden_fastmem_window_bits();\n")
     endif()
+    string(PREPEND wrapper "extern \"C\" bool eden_spread_cores;\n")
     set(derived "${PORT_BUILD_DIR}/arm_dynarmic_${bits}.cpp")
     if(EDEN_DEV_PROFILE)
         string(PREPEND wrapper "#include \"${EDEN_PORT_DIR}/performance.h\"\n")
@@ -720,6 +722,33 @@ write_derived("${PORT_BUILD_DIR}/physical_core.cpp"
     "${physical_core_prefix}#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/arm/debug.h\"\n${physical_core_source}")
 list(REMOVE_ITEM core_sources "hle/kernel/physical_core.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/physical_core.cpp")
+# Spread cores (experiment, dev-settings spread_cores=on): an application thread allowed on
+# guest core 0, 1 or 2 may also run on core 3, which the system leaves idle, so two threads a
+# game pins to one core can run at the same time. Only the scheduler's (physical) affinity is
+# widened; the masks the game reads are unchanged, and a game thread asking for its core while
+# on core 3 gets its home core. Does not yet keep a thread's core-mates off core 3 while it has
+# preemption disabled.
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/svc/svc_processor.cpp" processor_source)
+set(processor_old "    return static_cast<int32_t>(system.CurrentPhysicalCore().CoreIndex());\n")
+string(FIND "${processor_source}" "${processor_old}" processor_at)
+if(processor_at LESS 0)
+    message(FATAL_ERROR "Pinned GetCurrentProcessorNumber changed")
+endif()
+string(REPLACE "${processor_old}" [=[    const auto core = static_cast<int32_t>(system.CurrentPhysicalCore().CoreIndex());
+    if (eden_spread_cores && core == 3) {
+        // A game thread lent core 3 reports its home core: the game never sees core 3.
+        auto* thread = GetCurrentThreadPointer(system.Kernel());
+        s32 ideal = 0;
+        u64 mask = 0;
+        if (thread != nullptr && thread->GetOwnerProcess() != nullptr && thread->GetOwnerProcess()->IsApplication() &&
+            R_SUCCEEDED(thread->GetCoreMask(system.Kernel(), &ideal, &mask)) && (mask & 8) == 0)
+            return ideal >= 0 && ideal < 3 ? ideal : std::countr_zero(mask);
+    }
+    return core;
+]=] processor_source "${processor_source}")
+write_derived("${PORT_BUILD_DIR}/svc_processor.cpp" "#include <bit>\n#include \"core/hle/kernel/k_process.h\"\n#include \"core/hle/kernel/k_thread.h\"\nextern \"C\" bool eden_spread_cores;\n${processor_source}")
+list(REMOVE_ITEM core_sources "hle/kernel/svc/svc_processor.cpp")
+list(APPEND core_sources "${PORT_BUILD_DIR}/svc_processor.cpp")
 if(EDEN_DEV_PROFILE)
     # Guest-visible waits: syncpoint event registration to signal (GPU-pipeline latency
     # the game waits on) and buffer-queue dequeue waits (presentation back-pressure).
@@ -1061,7 +1090,18 @@ if(finish_offset LESS 0)
     message(FATAL_ERROR "Pinned thread termination changed; review finalization lock scope.")
 endif()
 string(REPLACE "${old_finish}" "        {\n            KScopedSchedulerLock sl{kernel};\n            m_signaled = true;\n            KSynchronizationObject::NotifyAvailable(kernel);\n        }\n\n        // Finalization may block; scheduling must be enabled here.\n        this->Close(kernel);" thread_source "${thread_source}")
-write_derived("${PORT_BUILD_DIR}/k_thread.cpp" "${thread_source}")
+# Spread cores: see the comment above the svc_processor.cpp derivation.
+set(thread_init_old "        m_physical_affinity_mask.SetAffinity(phys_core, true);\n")
+set(thread_mask_old "            // If we haven't disabled migration, perform an affinity change.\n")
+foreach(anchor thread_init_old thread_mask_old)
+    string(FIND "${thread_source}" "${${anchor}}" anchor_at)
+    if(anchor_at LESS 0)
+        message(FATAL_ERROR "Pinned KThread affinity code changed (${anchor})")
+    endif()
+endforeach()
+string(REPLACE "${thread_init_old}" "${thread_init_old}        if (eden_spread_cores && owner != nullptr && owner->IsApplication() && phys_core < 3) {\n            m_physical_affinity_mask.SetAffinity(3, true);\n            ++eden_spread_widened;\n        }\n" thread_source "${thread_source}")
+string(REPLACE "${thread_mask_old}" "            if (eden_spread_cores && m_parent != nullptr && m_parent->IsApplication() && (p_affinity_mask & 7) != 0) {\n                p_affinity_mask |= 8;\n                ++eden_spread_widened;\n            }\n${thread_mask_old}" thread_source "${thread_source}")
+write_derived("${PORT_BUILD_DIR}/k_thread.cpp" "extern \"C\" bool eden_spread_cores;\nextern \"C\" unsigned long long eden_spread_widened;\n${thread_source}")
 get_target_property(core_sources core SOURCES)
 list(REMOVE_ITEM core_sources hle/kernel/k_thread.cpp)
 list(APPEND core_sources "${PORT_BUILD_DIR}/k_thread.cpp")
@@ -1860,8 +1900,10 @@ void Initialize() {
     # total 8.625GiB of the 12GiB direct memory, before the GPU; allocation
     # success still needs qualification.
     file(READ "${heap_source}" heap)
-    string(REPLACE "128 MiB" "3072 MiB" heap "${heap}")
-    string(REPLACE "(128u * 1024u * 1024u)" "(3072u * 1024u * 1024u)" heap "${heap}")
+    # 4095 MiB reserved (the size stays a 32-bit value) since the heap commits on demand (heap_arenas.inc): TotK reached the 3 GiB
+    # limit when a fourth guest core compiled its code too (spread cores).
+    string(REPLACE "128 MiB" "4095 MiB" heap "${heap}")
+    string(REPLACE "(128u * 1024u * 1024u)" "(4095u * 1024u * 1024u)" heap "${heap}")
     string(REPLACE "#include <sys/mman.h>" "#include <sys/mman.h>\nvoid *eden_heap_pages(size_t);\nvoid eden_heap_pages_free(void *, size_t);" heap "${heap}")
     string(REPLACE "mmap(NULL, PS5_OPENGL_HEAP_SIZE, PROT_READ | PROT_WRITE,\n                    MAP_PRIVATE | MAP_ANON, -1, 0)" "eden_heap_pages(PS5_OPENGL_HEAP_SIZE)" heap "${heap}")
     string(REPLACE "if (base == MAP_FAILED)" "if (base == NULL)" heap "${heap}")
