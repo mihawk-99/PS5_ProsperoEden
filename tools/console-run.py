@@ -121,8 +121,14 @@ def main():
     parser.add_argument('--press-every', type=float, default=3)
     parser.add_argument('--presses', type=int, default=20)
     parser.add_argument('--pc-sample', action='store_true', help='host PC sampling (pc-sample.txt)')
+    parser.add_argument('--trace-at', type=float, help='start the 3 s thread timeline this many seconds in')
+    parser.add_argument('--profile-at', type=float, help='start the 8 s guest-code profile this many seconds in (implies --pc-sample)')
+    parser.add_argument('--app-file', action='append', default=[],
+                        help='flag file placed in the app folder for this run (development probes)')
     parser.add_argument('--min-draws', type=float, default=800, help='draws per frame of an in-game window')
     args = parser.parse_args()
+    if args.profile_at is not None:
+        args.pc_sample = True
     if not re.fullmatch(r'[0-9A-Fa-f]{16}', args.rom):
         raise SystemExit('--rom must be a 16-digit title ID')
 
@@ -139,7 +145,9 @@ def main():
         delete(client, f'{APP}/{name}')
     if args.pc_sample:
         put(client, f'{APP}/pc-sample.txt', '1\n')
-    for name in ('heap.log', 'stderr.log'):
+    for name in args.app_file:
+        put(client, f'{APP}/{pathlib.PurePosixPath(name).name}', '1\n')
+    for name in ('heap.log', 'stderr.log', 'sched.bin', 'profile.bin'):
         delete(client, f'{DATA}/logs/{name}')
     client.quit()
 
@@ -165,7 +173,17 @@ def main():
         session.quit()
         print(f'stop requested after {args.seconds:.0f} s', flush=True)
 
-    workers = [threading.Thread(target=presses), threading.Thread(target=stop)]
+    def request(at, name):
+        if at is None or done.wait(at):
+            return
+        session = connect(env)
+        put(session, f'{APP}/{name}', '1\n')
+        session.quit()
+        print(f'{name} requested after {at:.0f} s', flush=True)
+
+    workers = [threading.Thread(target=presses), threading.Thread(target=stop),
+               threading.Thread(target=request, args=(args.trace_at, 'trace-start.txt')),
+               threading.Thread(target=request, args=(args.profile_at, 'profile-start.txt'))]
     for worker in workers:
         worker.start()
     klog = out / f'{args.label}-klog.txt'
@@ -181,12 +199,24 @@ def main():
     client = connect(env)
     for name in ('heap.log', 'stderr.log'):
         (out / f'{args.label}-{name.replace(".log", ".txt")}').write_text(get(client, f'{DATA}/logs/{name}') or '')
+    for wanted, name in ((args.trace_at, 'sched.bin'), (args.profile_at, 'profile.bin')):
+        if wanted is None:
+            continue
+        data = io.BytesIO()
+        try:
+            client.retrbinary(f'RETR {DATA}/logs/{name}', data.write)
+            (out / f'{args.label}-{name}').write_bytes(data.getvalue())
+            print(f'{name}: {len(data.getvalue())} bytes')
+        except ftplib.all_errors as error:
+            print(f'{name}: none', error)
     # Leave the console as it was: the player's resolution, no development files.
     config = json.loads(get(client, f'{DATA}/config/prosperoeden.json') or '{}')
     if chosen_resolution:
         config.setdefault('video', {})['resolution'] = chosen_resolution
         put(client, f'{DATA}/config/prosperoeden.json', json.dumps(config, indent=2) + '\n')
-    for name in ('dev-settings.txt', 'compat-input.txt', 'pc-sample.txt', 'stop-game.txt'):
+    for name in ['dev-settings.txt', 'compat-input.txt', 'pc-sample.txt', 'stop-game.txt', 'trace-start.txt',
+                 'profile-start.txt'] + \
+            [pathlib.PurePosixPath(name).name for name in args.app_file]:
         delete(client, f'{APP}/{name}')
     client.quit()
     heap = (out / f'{args.label}-heap.txt').read_text()

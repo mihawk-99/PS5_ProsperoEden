@@ -107,3 +107,43 @@ its CPU at 3.2 GHz in this mode (`SceSystemStateMgr` lines in klog).
 So 60 fps in TotK's open world is not reachable through these three routes. What is left
 would change behaviour or the system (a higher CPU clock, which needs a system setting, or
 accuracy trade-offs, which are excluded).
+
+## CPU clock (2026-10-01)
+
+- `sceKernelSetCpumodeGame` accepts 0 and 1 only (others `0x80020016`); 1 is the default
+  (system CPU mode 5), 0 gives system CPU mode 1. Neither changes the clock.
+- `sceSystemServiceChangeCpuClock` returns success for every argument tried (3500, 3200, 0-3)
+  and changes nothing measurable.
+- The kernel chooses the clock profile when a title starts (klog `[BAPM]` lines). ProsperoEden,
+  built against SDK version 2.00, gets `Gen2 UB High CPU Frequency` (`proc gen:2 ... ub:1`); a
+  current retail game (SDK 4.00) gets `Default` (`proc gen:3 ... ub:0`). A dependent-addition
+  loop measures about 3.75 GHz in ProsperoEden. The `SceSystemStateMgr` lines show 3200 for
+  both: a nominal value. So the clock is already the high-frequency profile; going further
+  would mean changing the processor's power state from the kernel, which is not done here.
+
+## Where TotK's frame goes, by thread (2026-10-01)
+
+`tools/console-run.py --trace-at` records 3 s of guest thread runs, supervisor calls and
+core idle periods; `tools/analyze-trace.py` summarises them. TotK at 4K, in Hyrule:
+
+- Six worker threads (priority 44, two pinned to each guest core) run 8-10.6 ms per 25 ms
+  frame each; they hand work to each other with `WaitForAddress`/`SignalToAddress` and yield
+  (`SleepThread(0)`) about 490 times per frame.
+- Per guest core: guest code 74-80%, idle 16-23%, the emulator's kernel and scheduler 3.7-3.9%
+  (about 2.4 us per thread switch). Waking a signalled thread takes 2.5 us at the median;
+  the long tail is the game's design (a woken worker waits for the other worker on its core).
+- Spinning 1 ms instead of 0.1 ms before a core sleeps changed nothing (39.8 against 39.5 fps).
+
+So the frame rate follows the JIT's speed: the idle time is the workers waiting on each
+other's work and shrinks with it.
+
+## Where the guest code time goes (2026-10-01)
+
+`tools/console-run.py --profile-at` samples cores 0-2 at 2 kHz for 8 s with every core's JIT
+block table; `tools/analyze-profile.py` attributes the samples. TotK at 4K: 72.5% of samples in
+translated code, 7.5% in the idle spin, 13.7% in kernel waits (mostly idle sleeping), 3.4%
+in JIT stubs outside blocks, about 3% elsewhere in the emulator. The translated code is flat:
+the hottest block has 0.9% of the samples, the top 30 blocks 7.7%, the hottest 25 pages of
+guest code 18%. No small set of guest routines dominates, so replacing a few with host code
+would not help much; a gain has to come from all translated code. JIT code already sits on
+2 MiB pages.

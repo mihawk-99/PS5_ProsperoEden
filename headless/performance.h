@@ -29,6 +29,27 @@ unsigned long long GpuMemoryLimit(unsigned long long vulkan_used);
 // GPU worker only: firmware rejects cross-thread CPU-time sampling.
 void SampleGpuFrame(unsigned frame);
 #ifdef EDEN_DEV_PROFILE
+// Development thread timeline (trace-start.txt in the app folder): guest threads starting and
+// stopping on the emulated cores, their supervisor calls with the first arguments and results,
+// core idle periods and queued frames, for a few seconds, written to logs/sched.bin.
+enum class TraceType : unsigned char { RunBegin, RunEnd, SvcBegin, SvcEnd, IdleBegin, IdleEnd, Frame };
+struct TraceEvent {
+    long long ns;
+    unsigned thread;
+    unsigned short core;
+    unsigned char type, svc;
+    unsigned long long a0, a1;
+};
+static_assert(sizeof(TraceEvent) == 32);
+inline std::atomic<bool> trace_active{false};
+void TraceRecord(TraceType type, unsigned core, unsigned long long thread, unsigned svc,
+                 unsigned long long a0, unsigned long long a1);
+inline void Trace(TraceType type, unsigned core, unsigned long long thread, unsigned svc = 0,
+                  unsigned long long a0 = 0, unsigned long long a1 = 0) {
+    if (trace_active.load(std::memory_order_relaxed)) TraceRecord(type, core, thread, svc, a0, a1);
+}
+// Input worker: starts a trace when trace-start.txt appears, writes it when its time is up.
+void PollTrace();
 void BeginPcSampling();
 void PollGpuPc();
 // Guest core whose host PCs the development sampler collects (dev-settings pc_core=N, default 0).
